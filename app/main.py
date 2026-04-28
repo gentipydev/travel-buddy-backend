@@ -1,5 +1,9 @@
 import json
+import logging
+import time
 from contextlib import asynccontextmanager
+from uuid import UUID
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -9,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import client, settings, get_supabase
 from app.database import (
+    Conversation,
+    Place,
     User,
     UserPreferences,
     init_db,
@@ -16,7 +22,28 @@ from app.database import (
     get_or_create_user,
 )
 from app.auth.supabase_auth import get_current_user, get_optional_user
-from app.services.place_service import detect_place, to_card_dict
+from app.services.conversation_service import (
+    append_messages,
+    build_history,
+    generate_title,
+    get_or_create_conversation,
+    maybe_summarize,
+)
+from app.services.place_service import to_card_dict
+from app.services.rag_service import retrieve_chunks
+from app.services.telemetry import (
+    RequestTrace,
+    log_trace,
+    new_request_id,
+    utc_now_iso,
+)
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
 
 MAX_MESSAGE_LENGTH = 4000
 MAX_HISTORY_MESSAGES = 20
@@ -71,7 +98,7 @@ app = FastAPI(title="Travel Buddy API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -96,6 +123,9 @@ class ChatRequest(BaseModel):
         default_factory=list, max_length=MAX_HISTORY_MESSAGES
     )
     images: list[str] | None = Field(default=None, max_length=5)
+    # When provided alongside an authenticated user, server-side history
+    # supersedes `conversation_history`. Anonymous requests ignore this field.
+    conversation_id: UUID | None = None
 
 
 class UpdatePreferencesRequest(BaseModel):
@@ -200,25 +230,149 @@ async def get_my_preferences(
     }
 
 
+@app.get("/conversations")
+async def list_conversations(
+    supa_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    user = await _require_local_user(supa_user, db)
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.user_id == user.id)
+        .order_by(Conversation.updated_at.desc())
+    )
+    conversations = result.scalars().all()
+    return [
+        {
+            "id": str(c.id),
+            "title": c.title,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+            "message_count": len(c.messages or []),
+        }
+        for c in conversations
+    ]
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: UUID,
+    supa_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    user = await _require_local_user(supa_user, db)
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+    )
+    conv = result.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {
+        "id": str(conv.id),
+        "title": conv.title,
+        "summary": conv.summary,
+        "messages": list(conv.messages or []),
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+    }
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: UUID,
+    supa_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    user = await _require_local_user(supa_user, db)
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+    )
+    conv = result.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await db.delete(conv)
+    await db.commit()
+    return {"status": "deleted"}
+
+
 @app.post("/chat/stream")
 async def chat_stream(
     request: ChatRequest,
     supa_user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_session),
 ):
+    request_id = new_request_id()
+    started_at = time.perf_counter()
+    timestamp = utc_now_iso()
+    user_id = supa_user["id"] if supa_user else None
+    message_length = len(request.message)
+
     preferences = None
+    local_user: User | None = None
     if supa_user:
         user_result = await db.execute(
             select(User).where(User.supabase_uid == supa_user["id"])
         )
-        user = user_result.scalar_one_or_none()
-        if user:
+        local_user = user_result.scalar_one_or_none()
+        if local_user:
             pref_result = await db.execute(
-                select(UserPreferences).where(UserPreferences.user_id == user.id)
+                select(UserPreferences).where(UserPreferences.user_id == local_user.id)
             )
             preferences = pref_result.scalar_one_or_none()
 
+    logger.info(
+        "chat_stream: supabase_uid=%s conversation_id=%s local_user_resolved=%s",
+        supa_user["id"] if supa_user else None,
+        request.conversation_id,
+        local_user is not None,
+    )
+
+    # Server-side conversation persistence: only when auth + synced. Anonymous
+    # users (no token, or token but `users` row not synced via /users/me/sync)
+    # fall back to client-supplied `conversation_history` and are never written
+    # to the conversations table.
+    conversation: Conversation | None = None
+    new_conversation_id: UUID | None = None
+    if local_user is not None:
+        conversation = await get_or_create_conversation(
+            db, request.conversation_id, local_user.id
+        )
+        if request.conversation_id is None:
+            # Title comes from the first 6 words of the opening message; only
+            # set on creation so revisiting the conversation can't rewrite it.
+            conversation.title = " ".join(request.message.split()[:6]) or None
+            new_conversation_id = conversation.id
+        # Commit eagerly so the id we yield in the SSE event is durable even
+        # if the stream errors mid-flight.
+        await db.commit()
+        await db.refresh(conversation)
+
     system_prompt = build_system_prompt(preferences)
+
+    if conversation is not None:
+        history = build_history(conversation)
+    else:
+        history = [m.model_dump() for m in request.conversation_history]
+
+    retrieved, top_rerank_score = await retrieve_chunks(
+        request.message, db, history
+    )
+    retrieval_used = bool(retrieved)
+    chunks_returned = len(retrieved)
+
+    if retrieved:
+        context = "\n\n---\n\n".join(c.content for c in retrieved)
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            "Relevant context from our Albania database:\n"
+            f"{context}"
+        )
 
     if request.images:
         user_content: list[dict] = [
@@ -231,15 +385,21 @@ async def chat_stream(
     else:
         user_payload = request.message
 
-    messages = [m.model_dump() for m in request.conversation_history] + [
-        {"role": "user", "content": user_payload}
-    ]
+    messages = history + [{"role": "user", "content": user_payload}]
 
-    place = await detect_place(request.message, db)
-    card_payload = json.dumps(to_card_dict(place)) if place is not None else None
+    card_payload = None
+    if retrieved and retrieved[0].place_id is not None:
+        place = await db.get(Place, retrieved[0].place_id)
+        if place is not None:
+            card_payload = json.dumps(to_card_dict(place))
 
     async def stream():
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        assistant_text: str | None = None
         try:
+            if new_conversation_id is not None:
+                yield f"event: conversation_id\ndata: {new_conversation_id}\n\n"
             if card_payload is not None:
                 yield f"event: place_card\ndata: {card_payload}\n\n"
             async with client.messages.stream(
@@ -252,8 +412,80 @@ async def chat_stream(
                     # SSE: escape embedded newlines so multi-line chunks stay one event
                     safe = text.replace("\n", "\ndata: ")
                     yield f"data: {safe}\n\n"
-                yield "data: [DONE]\n\n"
+                # Capture final message inside the context manager so the
+                # accumulated state is still alive. Wrapped — token-count or
+                # SDK-shape failures must not crash the request.
+                try:
+                    final = await response.get_final_message()
+                    input_tokens = final.usage.input_tokens
+                    output_tokens = final.usage.output_tokens
+                    assistant_text = "".join(
+                        b.text for b in final.content if b.type == "text"
+                    )
+                except Exception:
+                    input_tokens = None
+                    output_tokens = None
+                    assistant_text = None
+
+            # Persist BEFORE yielding [DONE]. The Flutter SSE parser closes the
+            # connection on [DONE], and Starlette cancels the still-running
+            # generator at its next await point. In Python 3.12 CancelledError
+            # is BaseException, so `except Exception` cannot catch it — the
+            # commit silently never lands. Doing the write here guarantees
+            # durability before the client can disconnect. Tokens still stream
+            # live during the loop above, so the user-visible latency added
+            # is only the DB write (~50–150ms typical).
+            if conversation is not None and assistant_text:
+                try:
+                    await append_messages(
+                        db, conversation, request.message, assistant_text
+                    )
+                    if new_conversation_id is not None:
+                        await generate_title(
+                            db,
+                            conversation,
+                            client,
+                            settings.model_chat,
+                            request.message,
+                            assistant_text,
+                        )
+                    await maybe_summarize(
+                        db, conversation, client, settings.model_chat
+                    )
+                except Exception:
+                    logger.exception("conversation persist failed")
+
+            yield "data: [DONE]\n\n"
+
+            log_trace(RequestTrace(
+                request_id=request_id,
+                timestamp=timestamp,
+                user_id=user_id,
+                message_length=message_length,
+                retrieval_used=retrieval_used,
+                chunks_returned=chunks_returned,
+                top_rerank_score=top_rerank_score,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=(time.perf_counter() - started_at) * 1000,
+                model=settings.model_chat,
+                error=None,
+            ))
         except Exception as e:
+            log_trace(RequestTrace(
+                request_id=request_id,
+                timestamp=timestamp,
+                user_id=user_id,
+                message_length=message_length,
+                retrieval_used=retrieval_used,
+                chunks_returned=chunks_returned,
+                top_rerank_score=top_rerank_score,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=(time.perf_counter() - started_at) * 1000,
+                model=settings.model_chat,
+                error=str(e),
+            ))
             yield f"event: error\ndata: {str(e)}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")

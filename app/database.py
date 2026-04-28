@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator
 import uuid
 
-from sqlalchemy import Column, String, Integer, Float, ForeignKey, DateTime, Index, select
+from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Index, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base, relationship
@@ -11,11 +11,17 @@ from pgvector.sqlalchemy import Vector
 from app.config import settings
 
 # Supabase transaction pooler (port 6543) is pgbouncer in transaction mode —
-# prepared statements break across connection swaps, so disable the cache.
+# prepared statements break across connection swaps. Disable the cache AND
+# randomize statement names: pgbouncer's backend-connection reuse causes
+# DuplicatePreparedStatementError when asyncpg's default __asyncpg_stmt_N__
+# names collide across processes.
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    connect_args={"statement_cache_size": 0},
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
+    },
     pool_pre_ping=True,
 )
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -83,6 +89,7 @@ class Place(Base):
     rating = Column(Float)
     price_level = Column(Integer)
     photos = Column(JSONB, default=list)  # public Supabase Storage URLs
+    description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     chunks = relationship("Chunk", back_populates="place", cascade="all, delete-orphan")
@@ -101,6 +108,48 @@ class Chunk(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     place = relationship("Place", back_populates="chunks")
+
+
+class Conversation(Base):
+    """Server-side chat session. `messages` is a JSONB array of
+    {role, content, timestamp}. Once it grows past 20 entries the oldest 15
+    are folded into `summary` (see services.conversation_service) so the LLM
+    context stays bounded while long-term memory is preserved.
+
+    Anonymous users do not get a Conversation row — `user_id` is nullable for
+    schema flexibility, but the /chat/stream path only persists when the
+    requester is authenticated AND has a synced local users row.
+
+    Migration (also in supabase/migrations/006_create_conversations.sql):
+
+        CREATE TABLE IF NOT EXISTS public.conversations (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id INTEGER REFERENCES public.users(id) ON DELETE CASCADE,
+            title TEXT,
+            messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+            summary TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS conversations_user_id_idx
+            ON public.conversations (user_id);
+        CREATE INDEX IF NOT EXISTS conversations_user_updated_idx
+            ON public.conversations (user_id, updated_at DESC);
+    """
+    __tablename__ = "conversations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    title = Column(String, nullable=True)
+    messages = Column(JSONB, nullable=False, default=list)
+    summary = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class Trip(Base):
