@@ -22,10 +22,10 @@ from app.config import settings
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    prepared_statement_cache_size=0,
-    prepared_statement_name_func=lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
     connect_args={
         "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
     },
     pool_pre_ping=True,
 )
