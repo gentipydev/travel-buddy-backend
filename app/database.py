@@ -10,17 +10,22 @@ from pgvector.sqlalchemy import Vector
 
 from app.config import settings
 
-# Supabase transaction pooler (port 6543) is pgbouncer in transaction mode —
-# prepared statements break across connection swaps. Disable the cache AND
-# randomize statement names: pgbouncer's backend-connection reuse causes
-# DuplicatePreparedStatementError when asyncpg's default __asyncpg_stmt_N__
-# names collide across processes.
+# Supabase transaction pooler (port 6543) is pgbouncer in transaction mode.
+# Three independent caches must be defeated for this to work reliably:
+#   1. asyncpg's internal cache (statement_cache_size)         — connect_args
+#   2. SQLAlchemy's PreparedStatement cache (prepared_statement_cache_size)
+#   3. Statement-name collisions across worker processes
+#      (prepared_statement_name_func with UUID-based names)
+# Without #2, SQLAlchemy hands a stale PreparedStatement to a backend
+# connection pgbouncer has since reassigned, raising
+# InvalidSQLStatementNameError ("prepared statement ... does not exist").
 engine = create_async_engine(
     settings.database_url,
     echo=False,
+    prepared_statement_cache_size=0,
+    prepared_statement_name_func=lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
     connect_args={
         "statement_cache_size": 0,
-        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
     },
     pool_pre_ping=True,
 )
