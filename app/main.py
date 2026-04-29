@@ -488,7 +488,15 @@ async def chat_stream(
             ))
             yield f"event: error\ndata: {str(e)}\n\n"
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 if __name__ == "__main__":
