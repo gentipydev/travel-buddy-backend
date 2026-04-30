@@ -15,7 +15,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import Conversation
+from app.db.models import Conversation
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,11 @@ async def maybe_summarize(
 
     Best-effort — failures log and return; the next turn will retry.
     """
+    # FUTURE: once a user accumulates ~5 summarized conversations (or
+    # roughly that many compactions), kick off POST /preferences/persona
+    # automatically so an inferred travel_persona is built from real chat
+    # history rather than relying on the explicit preferences UI.
+    # Comment only — not wired.
     messages = list(conversation.messages or [])
     if len(messages) <= _SUMMARIZE_TRIGGER:
         return
