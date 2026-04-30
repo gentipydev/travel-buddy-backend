@@ -13,7 +13,8 @@ import cohere
 from sqlalchemy import select
 
 from app.config import settings
-from app.database import Chunk, async_session
+from app.db.engine import async_session
+from app.db.models import Chunk
 
 
 BATCH_SIZE = 96  # Cohere embed API accepts up to 96 inputs per call

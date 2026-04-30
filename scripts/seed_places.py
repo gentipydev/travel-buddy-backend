@@ -10,7 +10,8 @@ import asyncio
 
 from sqlalchemy import select
 
-from app.database import Place, async_session
+from app.db.engine import async_session
+from app.db.models import Place
 
 
 PLACES: list[dict] = [

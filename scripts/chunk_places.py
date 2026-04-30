@@ -16,7 +16,8 @@ import asyncio
 
 from sqlalchemy import select
 
-from app.database import Chunk, Place, async_session
+from app.db.engine import async_session
+from app.db.models import Chunk, Place
 
 
 CHUNK_SOURCE = "place_description"
