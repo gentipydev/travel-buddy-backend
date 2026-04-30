@@ -434,7 +434,11 @@ async def chat_stream(
             if conversation is not None and assistant_text:
                 try:
                     await append_messages(
-                        db, conversation, request.message, assistant_text
+                        db,
+                        conversation,
+                        request.message,
+                        assistant_text,
+                        images=request.images,
                     )
                     if new_conversation_id is not None:
                         await generate_title(

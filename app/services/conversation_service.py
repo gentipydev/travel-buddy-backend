@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Conversation
@@ -29,6 +29,8 @@ _SUMMARIZE_PROMPT = (
 _SUMMARIZE_TRIGGER = 20
 _SUMMARIZE_BATCH = 15
 _HISTORY_TAIL = 10
+
+_MAX_CONVERSATIONS_PER_USER = 50
 
 _TITLE_PROMPT = (
     "You will be shown one turn of a chat between a user and an Albania travel "
@@ -80,6 +82,23 @@ async def get_or_create_conversation(
         if conv is not None:
             return conv
 
+    count_result = await db.execute(
+        select(func.count()).where(Conversation.user_id == user_id)
+    )
+    count = count_result.scalar_one()
+    if count >= _MAX_CONVERSATIONS_PER_USER:
+        oldest_result = await db.execute(
+            select(Conversation.id)
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.created_at.asc())
+            .limit(1)
+        )
+        oldest_id = oldest_result.scalar_one_or_none()
+        if oldest_id is not None:
+            await db.execute(
+                delete(Conversation).where(Conversation.id == oldest_id)
+            )
+
     conv = Conversation(
         id=conversation_id,  # None → SQLAlchemy default uuid.uuid4
         user_id=user_id,
@@ -95,6 +114,7 @@ async def append_messages(
     conversation: Conversation,
     user_msg: str,
     assistant_msg: str,
+    images: list[str] | None = None,
 ) -> None:
     """Append the (user, assistant) turn pair with UTC timestamps and commit.
 
@@ -106,11 +126,26 @@ async def append_messages(
     it. The raw UPDATE bypasses the ORM tracking layer entirely and
     is read-back into the Python object via a fresh SELECT, so the
     in-memory state stays consistent for the rest of the request.
+
+    `images` carries the public Supabase Storage URLs attached to the
+    current-turn user message. Persisting them here lets `build_history`
+    rebuild the multimodal Anthropic content blocks on later turns, so
+    resumed conversations preserve visual context.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     new_messages = list(conversation.messages or []) + [
-        {"role": "user", "content": user_msg, "timestamp": now_iso},
-        {"role": "assistant", "content": assistant_msg, "timestamp": now_iso},
+        {
+            "role": "user",
+            "content": user_msg,
+            "images": images or [],
+            "timestamp": now_iso,
+        },
+        {
+            "role": "assistant",
+            "content": assistant_msg,
+            "images": [],
+            "timestamp": now_iso,
+        },
     ]
     await db.execute(
         update(Conversation)
@@ -121,21 +156,45 @@ async def append_messages(
     conversation.messages = new_messages
 
 
+def _render_message(m: dict) -> dict:
+    """Render a persisted message as a Claude `messages` entry.
+
+    If the message has stored image URLs, rebuild a multimodal content
+    block list (images first, optional text last) — same shape produced
+    for the current-turn payload in /chat/stream. Otherwise pass the
+    text content through. Tolerates rows persisted before the `images`
+    field existed (`.get("images")` → None → string branch).
+    """
+    images = m.get("images") or []
+    if images:
+        content: list[dict] = [
+            {"type": "image", "source": {"type": "url", "url": u}}
+            for u in images
+        ]
+        if m.get("content"):
+            content.append({"type": "text", "text": m["content"]})
+        return {"role": m["role"], "content": content}
+    return {"role": m["role"], "content": m["content"]}
+
+
 def build_history(conversation: Conversation) -> list[dict]:
     """Render conversation as a Claude `messages` array.
 
     - len ≤ 20: return all turns verbatim as {role, content}.
     - len > 20: return [{assistant: summary}, *last 10 turns].
+
+    Messages with persisted image URLs are reconstructed as multimodal
+    content blocks via `_render_message`.
     """
     messages = list(conversation.messages or [])
     if len(messages) <= _SUMMARIZE_TRIGGER:
-        return [{"role": m["role"], "content": m["content"]} for m in messages]
+        return [_render_message(m) for m in messages]
 
     summary = conversation.summary or ""
     tail = messages[-_HISTORY_TAIL:]
     return [
         {"role": "assistant", "content": summary},
-        *({"role": m["role"], "content": m["content"]} for m in tail),
+        *(_render_message(m) for m in tail),
     ]
 
 
