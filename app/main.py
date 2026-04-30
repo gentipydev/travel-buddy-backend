@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import client, settings, get_supabase
 from app.database import (
     Conversation,
-    Place,
     User,
     UserPreferences,
     init_db,
@@ -29,7 +28,7 @@ from app.services.conversation_service import (
     get_or_create_conversation,
     maybe_summarize,
 )
-from app.services.place_service import to_card_dict
+from app.services.place_service import detect_place, to_card_dict
 from app.services.rag_service import retrieve_chunks
 from app.services.telemetry import (
     RequestTrace,
@@ -387,11 +386,8 @@ async def chat_stream(
 
     messages = history + [{"role": "user", "content": user_payload}]
 
-    card_payload = None
-    if retrieved and retrieved[0].place_id is not None:
-        place = await db.get(Place, retrieved[0].place_id)
-        if place is not None:
-            card_payload = json.dumps(to_card_dict(place))
+    place = await detect_place(request.message, db)
+    card_payload = json.dumps(to_card_dict(place)) if place else None
 
     async def stream():
         input_tokens: int | None = None
