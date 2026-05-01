@@ -23,6 +23,19 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
 
 
+class TripCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    itinerary: dict = Field(default_factory=dict)
+
+
+class TripOut(BaseModel):
+    id: str
+    title: str
+    itinerary: dict
+    created_at: str
+    updated_at: str
+
+
 class UpdatePreferencesRequest(BaseModel):
     # All preference fields nullable — we never write hardcoded defaults
     # to the DB. The chat layer infers what's missing from conversation.
