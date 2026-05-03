@@ -26,12 +26,14 @@ class ChatRequest(BaseModel):
 class TripCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     itinerary: dict = Field(default_factory=dict)
+    place_id: str | None = None
 
 
 class TripOut(BaseModel):
     id: str
     title: str
     itinerary: dict
+    place_id: str | None = None
     created_at: str
     updated_at: str
 

@@ -3,6 +3,7 @@ from app.config import get_supabase
 PLACE_PHOTOS_BUCKET = "place-photos"
 TRIP_EXPORTS_BUCKET = "trip-exports"
 CHAT_ATTACHMENTS_BUCKET = "chat-attachments"
+ARTIFACT_PHOTOS_BUCKET = "artifact-photos"
 
 
 async def upload_place_photo(
@@ -21,13 +22,30 @@ async def upload_place_photo(
     return supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(file_path)
 
 
-async def get_place_photos(place_id: str) -> list[str]:
+async def list_bucket_folder(bucket: str, prefix: str) -> list[str]:
+    """Public URLs for every file directly under `prefix` in `bucket`.
+
+    Subfolder/prefix entries in Supabase Storage's listing have a `name`
+    but no `id` (only file objects get a UUID), so we filter on `id`.
+    Sorted by filename for a stable order without persisting ordering
+    metadata.
+    """
     supabase = await get_supabase()
-    files = await supabase.storage.from_(PLACE_PHOTOS_BUCKET).list(path=place_id)
+    files = await supabase.storage.from_(bucket).list(path=prefix)
+    names = sorted(f["name"] for f in files if f.get("id"))
     return [
-        supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(f"{place_id}/{f['name']}")
-        for f in files if f.get("name")
+        supabase.storage.from_(bucket).get_public_url(f"{prefix}/{name}")
+        for name in names
     ]
+
+
+async def get_place_photos(place_id: str) -> list[str]:
+    return await list_bucket_folder(PLACE_PHOTOS_BUCKET, place_id)
+
+
+async def get_artifact_image_url(image_path: str) -> str:
+    supabase = await get_supabase()
+    return supabase.storage.from_(ARTIFACT_PHOTOS_BUCKET).get_public_url(image_path)
 
 
 async def upload_trip_export(user_id: str, trip_id: str, pdf_data: bytes) -> str:
