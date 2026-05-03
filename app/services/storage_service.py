@@ -18,14 +18,14 @@ async def upload_place_photo(
         file_data,
         {"content-type": content_type, "upsert": "true"},
     )
-    return supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(file_path)
+    return await supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(file_path)
 
 
 async def get_place_photos(place_id: str) -> list[str]:
     supabase = await get_supabase()
     files = await supabase.storage.from_(PLACE_PHOTOS_BUCKET).list(path=place_id)
     return [
-        supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(f"{place_id}/{f['name']}")
+        await supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(f"{place_id}/{f['name']}")
         for f in files if f.get("name")
     ]
 
