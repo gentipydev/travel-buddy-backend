@@ -13,8 +13,8 @@ import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import Chunk
-from app.services.place_service import rerank_chunks, search_chunks
+from app.db.models import Chunk
+from app.services.embedding_service import rerank_chunks, search_chunks
 
 
 logger = logging.getLogger(__name__)

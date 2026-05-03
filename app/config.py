@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/travel_buddy"
     allowed_origins: str = "http://localhost:3000"
 
-    model_chat: str = "claude-sonnet-4-6"
+    model_chat: str = "claude-haiku-4-5-20251001"
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 

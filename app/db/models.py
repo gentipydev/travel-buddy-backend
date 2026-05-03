@@ -1,35 +1,11 @@
 from datetime import datetime, timezone
-from typing import AsyncGenerator
 import uuid
 
-from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Index, select
-from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Index
+from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, TSVECTOR
 from sqlalchemy.orm import declarative_base, relationship
 from pgvector.sqlalchemy import Vector
 
-from app.config import settings
-
-# Supabase transaction pooler (port 6543) is pgbouncer in transaction mode.
-# Three independent caches must be defeated for this to work reliably:
-#   1. asyncpg's internal cache (statement_cache_size)         — connect_args
-#   2. SQLAlchemy's PreparedStatement cache (prepared_statement_cache_size)
-#   3. Statement-name collisions across worker processes
-#      (prepared_statement_name_func with UUID-based names)
-# Without #2, SQLAlchemy hands a stale PreparedStatement to a backend
-# connection pgbouncer has since reassigned, raising
-# InvalidSQLStatementNameError ("prepared statement ... does not exist").
-engine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    prepared_statement_cache_size=0,
-    prepared_statement_name_func=lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
-    connect_args={
-        "statement_cache_size": 0,
-    },
-    pool_pre_ping=True,
-)
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 Base = declarative_base()
 
@@ -56,27 +32,66 @@ class UserPreferences(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
-    budget = Column(String, default="mid-range")
-    travel_style = Column(JSONB, default=list)
-    food = Column(JSONB, default=list)
-    pace = Column(String, default="moderate")
-    interests = Column(JSONB, default=list)
-    language = Column(String, default="en")
+    # Nullable — never assume; defaults should emerge from conversation,
+    # not from the schema. Wrong defaults are worse than no defaults.
+    budget = Column(String, nullable=True, default=None)
+    travel_style = Column(JSONB, nullable=True, default=None)
+    food = Column(JSONB, nullable=True, default=None)
+    pace = Column(String, nullable=True, default=None)
+    interests = Column(JSONB, nullable=True, default=None)
+    group_type = Column(String, nullable=True, default=None)
+    accommodation = Column(String, nullable=True, default=None)
+    transport = Column(String, nullable=True, default=None)
+    travel_persona = Column(Text, nullable=True, default=None)
+    # Safe default — language is never nullable.
+    language = Column(String, nullable=False, default="en")
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     user = relationship("User", back_populates="preferences")
 
     def to_prompt(self) -> str:
-        parts = [f"- Budget: {self.budget}"]
+        """Render only the fields the user has actually set. Every preference
+        is labeled as a *default* — the override reminder in
+        `build_system_prompt` tells Claude that conversation always wins.
+        """
+        parts: list[str] = []
+        if self.travel_persona:
+            parts.append(
+                f"Travel persona (default vibe — defer to conversation): "
+                f"{self.travel_persona}"
+            )
+        if self.budget:
+            parts.append(f"- Default budget: {self.budget}")
+        if self.group_type:
+            parts.append(f"- Default group type: {self.group_type}")
         if self.travel_style:
-            parts.append(f"- Travel style: {', '.join(self.travel_style)}")
+            parts.append(f"- Default travel style: {', '.join(self.travel_style)}")
+        if self.accommodation:
+            parts.append(f"- Default accommodation: {self.accommodation}")
+        if self.transport:
+            parts.append(f"- Default transport: {self.transport}")
+        if self.pace:
+            parts.append(f"- Default pace: {self.pace}")
         if self.food:
             parts.append(f"- Food preferences: {', '.join(self.food)}")
-        parts.append(f"- Pace: {self.pace}")
         if self.interests:
             parts.append(f"- Interests: {', '.join(self.interests)}")
         parts.append(f"- Preferred language: {self.language}")
         return "\n".join(parts)
+
+    def has_preferences(self) -> bool:
+        """True if at least one meaningful preference has been set."""
+        return any([
+            self.budget,
+            self.travel_style,
+            self.food,
+            self.pace,
+            self.interests,
+            self.group_type,
+            self.accommodation,
+            self.transport,
+            self.travel_persona,
+        ])
 
 
 class Place(Base):
@@ -162,6 +177,12 @@ class Trip(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    place_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("places.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title = Column(String, nullable=False)
     itinerary = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow)
@@ -179,31 +200,45 @@ Index(
 )
 
 
-async def init_db():
-    """No-op: schema is managed via supabase/migrations/ run in the SQL Editor.
-    pgvector is enabled there too."""
-    return
+class Artifact(Base):
+    """Curated Albanian artifact tied to one of the 8 mobile-app destinations.
+
+    Image bytes live in the `artifact-photos` Supabase Storage bucket at
+    `image_path`; the manifest endpoints return the public URL. `category`
+    distinguishes featured artifacts ('highlight') from the smaller hidden
+    set surfaced through the collectibles UI ('collectible'). `search_text`
+    is a generated TSVECTOR populated by a trigger (see migration 010).
+    """
+    __tablename__ = "artifacts"
+
+    id = Column(String, primary_key=True)
+    destination_slug = Column(String, nullable=False, index=True)
+    category = Column(String, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    title = Column(String, nullable=False)
+    date_text = Column(String)
+    period = Column(String)
+    country = Column(String)
+    culture = Column(String)
+    medium = Column(String)
+    dimension = Column(String)
+    classification = Column(String)
+    object_type = Column(String)
+    object_begin_year = Column(Integer)
+    object_end_year = Column(Integer)
+    image_path = Column(String, nullable=False)
+    icon_name = Column(String)
+    search_text = Column(TSVECTOR)
 
 
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    async with async_session() as session:
-        yield session
-
-
-async def get_or_create_user(db: AsyncSession, supabase_user: dict) -> User:
-    """Find user by supabase_uid or create new one."""
-    result = await db.execute(
-        select(User).where(User.supabase_uid == supabase_user["id"])
-    )
-    user = result.scalar_one_or_none()
-    if not user:
-        email = supabase_user.get("email", "") or ""
-        user = User(
-            supabase_uid=supabase_user["id"],
-            name=email.split("@")[0] if email else "user",
-            email=email,
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-    return user
+Index(
+    "artifacts_destination_idx",
+    Artifact.destination_slug,
+    Artifact.category,
+    Artifact.sort_order,
+)
+Index(
+    "artifacts_search_idx",
+    Artifact.search_text,
+    postgresql_using="gin",
+)
