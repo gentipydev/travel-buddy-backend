@@ -1,4 +1,4 @@
-"""Create the two Supabase Storage buckets. Idempotent — safe to re-run.
+"""Create the Supabase Storage buckets. Idempotent — safe to re-run.
 
 Usage (from the project root, with deps installed):
     python -m scripts.setup_storage
@@ -49,6 +49,19 @@ async def setup():
         print("Created chat-attachments bucket")
     except Exception as e:
         print(f"chat-attachments: {e}")
+
+    try:
+        await supabase.storage.create_bucket(
+            "artifact-photos",
+            options={
+                "public": True,
+                "allowed_mime_types": ["image/jpeg", "image/png", "image/webp"],
+                "file_size_limit": 10485760,
+            },
+        )
+        print("Created artifact-photos bucket")
+    except Exception as e:
+        print(f"artifact-photos: {e}")
 
     # Storage RLS for chat-attachments is tracked in
     # supabase/migrations/004_create_storage_rls_policies.sql — apply it via

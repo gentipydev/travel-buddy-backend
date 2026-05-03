@@ -8,14 +8,16 @@ stays bounded, long-term memory survives in the summary.
 The /chat/stream endpoint persists turns AFTER `[DONE]` is yielded, so DB
 writes never block the user-visible stream.
 """
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Conversation
+from app.db.engine import async_session
+from app.db.models import Conversation, UserPreferences
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,30 @@ _TITLE_MAX_LEN = 60
 # Keep the assistant reply short in the title-gen prompt; long replies dominate
 # the input and tempt the model to quote them back as the "title".
 _TITLE_ASSISTANT_PREVIEW_LEN = 500
+
+# Persona-refresh tunables. Gate model is hardcoded so a future model_chat
+# upgrade can't accidentally make the YES/NO check expensive.
+_PERSONA_REFRESH_COOLDOWN = timedelta(hours=24)
+_PERSONA_GATE_MODEL = "claude-haiku-4-5-20251001"
+_PERSONA_RECENT_SUMMARIES = 5
+_PERSONA_MAX_TOKENS = 150
+
+_PERSONA_GATE_SYSTEM = "Answer only YES or NO. No other text."
+_PERSONA_GATE_USER = (
+    "Current travel persona: {persona}\n\n"
+    "New conversation summary: {summary}\n\n"
+    "Does this conversation reveal something meaningfully new about this "
+    "traveler that is not already captured in their current persona? "
+    "Consider: new budget signals, contradictions, new group type, dietary "
+    "preferences, transport preferences, or destination patterns."
+)
+_PERSONA_REFRESH_SYSTEM = (
+    "You update travel persona descriptions based on conversation history. "
+    "Output exactly 2-3 sentences in second person ('You are...'). Describe "
+    "tendencies, not rules — the user may deviate per trip. Merge new signals "
+    "with the existing persona without losing what was already known. No "
+    "preamble, no bullet points."
+)
 
 
 async def get_or_create_conversation(
@@ -210,11 +236,6 @@ async def maybe_summarize(
 
     Best-effort — failures log and return; the next turn will retry.
     """
-    # FUTURE: once a user accumulates ~5 summarized conversations (or
-    # roughly that many compactions), kick off POST /preferences/persona
-    # automatically so an inferred travel_persona is built from real chat
-    # history rather than relying on the explicit preferences UI.
-    # Comment only — not wired.
     messages = list(conversation.messages or [])
     if len(messages) <= _SUMMARIZE_TRIGGER:
         return
@@ -253,6 +274,154 @@ async def maybe_summarize(
     await db.commit()
     conversation.summary = new_summary
     conversation.messages = trimmed
+
+    # Signal-based travel_persona refresh. The task opens its own session,
+    # runs a Haiku YES/NO gate against the user's current persona, and
+    # rewrites it from recent summaries when warranted. Fire-and-forget so
+    # the chat stream is never blocked.
+    if conversation.user_id is not None:
+        asyncio.create_task(
+            refresh_travel_persona(
+                conversation.user_id, new_summary, client, model
+            )
+        )
+
+
+async def _should_refresh_persona(
+    summary: str,
+    current_persona: str | None,
+    client,  # AsyncAnthropic — typed loosely to avoid an import cycle
+) -> bool:
+    """Cheap Haiku gate: does `summary` reveal something new about the user
+    that the current persona doesn't already capture?
+
+    Pure helper — caller owns the DB. Hardcodes Haiku so a future
+    settings.model_chat upgrade can't make the gate pricey. Any API
+    failure returns False so the refresh is silently skipped.
+    """
+    if not summary:
+        return False
+    if not current_persona:
+        return True
+
+    try:
+        response = await client.messages.create(
+            model=_PERSONA_GATE_MODEL,
+            max_tokens=10,
+            system=_PERSONA_GATE_SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": _PERSONA_GATE_USER.format(
+                    persona=current_persona, summary=summary
+                ),
+            }],
+        )
+        answer = "".join(
+            b.text for b in response.content if b.type == "text"
+        ).strip().upper()
+        return answer.startswith("YES")
+    except Exception:
+        logger.exception("persona refresh gate failed")
+        return False
+
+
+async def refresh_travel_persona(
+    user_id: int,
+    latest_summary: str,
+    client,  # AsyncAnthropic — typed loosely to avoid an import cycle
+    model: str,
+) -> None:
+    """Fire-and-forget background task: enrich travel_persona from recent
+    conversation summaries.
+
+    Opens its own AsyncSession via async_session() — the request-scoped
+    session that triggered this task is closed by the time we run. All
+    failures log and return; the outer try/except catches anything
+    unexpected so a bug here cannot bubble into the event loop.
+
+    Guardrail: skips when user_preferences.updated_at is younger than
+    _PERSONA_REFRESH_COOLDOWN, which both prevents rapid-fire refreshes
+    and defers to a recent manual POST /preferences/persona write.
+    """
+    try:
+        async with async_session() as db:
+            prefs_row = await db.execute(
+                select(UserPreferences).where(
+                    UserPreferences.user_id == user_id
+                )
+            )
+            prefs = prefs_row.scalar_one_or_none()
+            if prefs is None:
+                return
+
+            if prefs.updated_at is not None:
+                age = datetime.now(timezone.utc) - prefs.updated_at
+                if age < _PERSONA_REFRESH_COOLDOWN:
+                    logger.info(
+                        "persona refresh skipped: prefs updated %.1fh ago "
+                        "(user_id=%s)",
+                        age.total_seconds() / 3600,
+                        user_id,
+                    )
+                    return
+
+            current_persona = prefs.travel_persona
+
+            if not await _should_refresh_persona(
+                latest_summary, current_persona, client
+            ):
+                return
+
+            summaries_row = await db.execute(
+                select(Conversation.summary)
+                .where(
+                    Conversation.user_id == user_id,
+                    Conversation.summary.is_not(None),
+                )
+                .order_by(Conversation.updated_at.desc())
+                .limit(_PERSONA_RECENT_SUMMARIES)
+            )
+            summaries = [s for s in summaries_row.scalars().all() if s]
+            if not summaries:
+                return
+            transcript = "\n\n---\n\n".join(summaries)
+
+            try:
+                response = await client.messages.create(
+                    model=model,
+                    max_tokens=_PERSONA_MAX_TOKENS,
+                    system=_PERSONA_REFRESH_SYSTEM,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            f"Existing persona: {current_persona or 'None set yet'}"
+                            f"\n\nRecent conversation summaries:\n{transcript}"
+                        ),
+                    }],
+                )
+                new_persona = "".join(
+                    b.text for b in response.content if b.type == "text"
+                ).strip()
+            except Exception:
+                logger.exception(
+                    "persona refresh generation failed (user_id=%s)", user_id
+                )
+                return
+
+            if not new_persona:
+                return
+
+            await db.execute(
+                update(UserPreferences)
+                .where(UserPreferences.user_id == user_id)
+                .values(travel_persona=new_persona)
+            )
+            await db.commit()
+            logger.info("travel_persona refreshed for user_id=%s", user_id)
+    except Exception:
+        logger.exception(
+            "refresh_travel_persona task crashed (user_id=%s)", user_id
+        )
 
 
 async def generate_title(

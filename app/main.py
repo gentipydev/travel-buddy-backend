@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_supabase, settings
 from app.db.engine import init_db
-from app.routers import chat, conversations, health, preferences, trips, users
+from app.routers import chat, conversations, health, images, preferences, trips, users
 
 
 logging.basicConfig(
@@ -37,6 +37,7 @@ app.include_router(preferences.router)
 app.include_router(conversations.router)
 app.include_router(chat.router)
 app.include_router(trips.router)
+app.include_router(images.router)
 
 
 if __name__ == "__main__":

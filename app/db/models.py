@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import uuid
 
 from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Index
-from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
+from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, TSVECTOR
 from sqlalchemy.orm import declarative_base, relationship
 from pgvector.sqlalchemy import Vector
 
@@ -177,6 +177,12 @@ class Trip(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    place_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("places.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title = Column(String, nullable=False)
     itinerary = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow)
@@ -191,4 +197,48 @@ Index(
     postgresql_using="hnsw",
     postgresql_with={"m": 16, "ef_construction": 64},
     postgresql_ops={"embedding": "vector_cosine_ops"},
+)
+
+
+class Artifact(Base):
+    """Curated Albanian artifact tied to one of the 8 mobile-app destinations.
+
+    Image bytes live in the `artifact-photos` Supabase Storage bucket at
+    `image_path`; the manifest endpoints return the public URL. `category`
+    distinguishes featured artifacts ('highlight') from the smaller hidden
+    set surfaced through the collectibles UI ('collectible'). `search_text`
+    is a generated TSVECTOR populated by a trigger (see migration 010).
+    """
+    __tablename__ = "artifacts"
+
+    id = Column(String, primary_key=True)
+    destination_slug = Column(String, nullable=False, index=True)
+    category = Column(String, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    title = Column(String, nullable=False)
+    date_text = Column(String)
+    period = Column(String)
+    country = Column(String)
+    culture = Column(String)
+    medium = Column(String)
+    dimension = Column(String)
+    classification = Column(String)
+    object_type = Column(String)
+    object_begin_year = Column(Integer)
+    object_end_year = Column(Integer)
+    image_path = Column(String, nullable=False)
+    icon_name = Column(String)
+    search_text = Column(TSVECTOR)
+
+
+Index(
+    "artifacts_destination_idx",
+    Artifact.destination_slug,
+    Artifact.category,
+    Artifact.sort_order,
+)
+Index(
+    "artifacts_search_idx",
+    Artifact.search_text,
+    postgresql_using="gin",
 )
