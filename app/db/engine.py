@@ -24,8 +24,14 @@ engine = create_async_engine(
         "statement_cache_size": 0,
         "prepared_statement_cache_size": 0,
         "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4().hex[:16]}__",
+        # Cap initial connect / handshake so a half-dead connection can't
+        # hang the pre_ping query indefinitely on Render free-tier wakeup.
+        "command_timeout": 10,
     },
     pool_pre_ping=True,
+    # Recycle connections every 30 min so silently-dropped TCP sockets on
+    # Render's idle workers can't sit in the pool past their useful life.
+    pool_recycle=1800,
 )
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

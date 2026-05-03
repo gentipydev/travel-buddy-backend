@@ -105,6 +105,11 @@ async def chat_stream(
                         db, ctx.conversation, client, settings.model_chat
                     )
                 except Exception:
+                    # Tokens already streamed live, but persistence failed —
+                    # tell the client so it can mark the assistant message as
+                    # "not saved" inline (no snackbar). Emit BEFORE [DONE]
+                    # so the parser sees it before the stream-done sentinel.
+                    yield "event: persist_failed\ndata: server_persist_failed\n\n"
                     logger.exception("conversation persist failed")
 
             yield "data: [DONE]\n\n"
