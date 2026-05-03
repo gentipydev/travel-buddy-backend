@@ -226,6 +226,25 @@
       "icon_name": "picture"
     },
     {
+      "id": "apollonia-roman-portrait-bust",
+      "destination_slug": "apollonia",
+      "category": "collectible",
+      "sort_order": 1,
+      "title": "Roman portrait bust",
+      "date_text": "1st century AD",
+      "period": "Roman Imperial",
+      "country": "Albania",
+      "culture": "Greco-Roman",
+      "medium": "Marble",
+      "dimension": "",
+      "classification": "Sculpture",
+      "object_type": "Portrait bust",
+      "object_begin_year": 1,
+      "object_end_year": 99,
+      "image_path": "apollonia/roman-bust.jpg",
+      "icon_name": "statue"
+    },
+    {
       "id": "albanian_alps-bjeshket-flora",
       "destination_slug": "albanian_alps",
       "category": "highlight",

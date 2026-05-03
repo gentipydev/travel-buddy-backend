@@ -53,7 +53,7 @@ async def get_place_photos(place_id: str) -> list[str]:
 
 async def get_artifact_image_url(image_path: str) -> str:
     supabase = await get_supabase()
-    return supabase.storage.from_(ARTIFACT_PHOTOS_BUCKET).get_public_url(image_path)
+    return await supabase.storage.from_(ARTIFACT_PHOTOS_BUCKET).get_public_url(image_path)
 
 
 async def upload_trip_export(user_id: str, trip_id: str, pdf_data: bytes) -> str:
