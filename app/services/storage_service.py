@@ -23,18 +23,26 @@ async def upload_place_photo(
 
 
 async def list_bucket_folder(bucket: str, prefix: str) -> list[str]:
-    """Public URLs for every file directly under `prefix` in `bucket`.
+    """Public URLs for every image file directly under `prefix` in `bucket`.
 
     Subfolder/prefix entries in Supabase Storage's listing have a `name`
     but no `id` (only file objects get a UUID), so we filter on `id`.
+    Also drops `.emptyFolderPlaceholder` (the 0-byte sentinel Supabase
+    Studio writes when you create a folder via the dashboard) and any
+    other non-image objects by checking the stored mimetype.
     Sorted by filename for a stable order without persisting ordering
     metadata.
     """
     supabase = await get_supabase()
     files = await supabase.storage.from_(bucket).list(path=prefix)
-    names = sorted(f["name"] for f in files if f.get("id"))
+    names = sorted(
+        f["name"]
+        for f in files
+        if f.get("id")
+        and (f.get("metadata") or {}).get("mimetype", "").startswith("image/")
+    )
     return [
-        supabase.storage.from_(bucket).get_public_url(f"{prefix}/{name}")
+        await supabase.storage.from_(bucket).get_public_url(f"{prefix}/{name}")
         for name in names
     ]
 
