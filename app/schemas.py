@@ -1,6 +1,14 @@
+from datetime import date
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+StopKind = Literal[
+    "sight", "beach", "hike", "meal", "stay", "transport", "activity"
+]
+Transportation = Literal["walk", "taxi", "tram", "bus", "car", "other"]
 
 
 MAX_MESSAGE_LENGTH = 4000
@@ -23,19 +31,132 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
 
 
+class TripStopCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    kind: StopKind
+    city: str | None = None
+    address: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=0)
+    arrival_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
+    )
+    end_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
+    )
+    transportation: Transportation | None = None
+    notes: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    google_place_id: str | None = None
+
+
+class TripDayCreate(BaseModel):
+    day_number: int = Field(ge=1)
+    title: str | None = None
+    base_city: str | None = None
+    stops: list[TripStopCreate] = Field(min_length=1)
+
+
 class TripCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    itinerary: dict = Field(default_factory=dict)
-    place_id: str | None = None
+    summary: str | None = None
+    start_date: date | None = None
+    days: list[TripDayCreate] = Field(min_length=1)
+
+
+class TripStopOut(TripStopCreate):
+    id: str
+    sort_order: int
+
+
+class TripDayOut(TripDayCreate):
+    id: str
+    stops: list[TripStopOut]
 
 
 class TripOut(BaseModel):
     id: str
     title: str
-    itinerary: dict
-    place_id: str | None = None
+    summary: str | None = None
+    start_date: date | None = None
+    days: list[TripDayOut]
     created_at: str
     updated_at: str
+
+
+class TripUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = None
+    start_date: date | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_null_title(cls, data):
+        if isinstance(data, dict) and "title" in data and data["title"] is None:
+            raise ValueError("title cannot be cleared")
+        return data
+
+
+class TripStopUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    kind: StopKind | None = None
+    city: str | None = None
+    address: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=0)
+    arrival_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
+    )
+    end_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
+    )
+    transportation: Transportation | None = None
+    notes: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    google_place_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_null_required(cls, data):
+        if not isinstance(data, dict):
+            return data
+        for key in ("name", "kind"):
+            if key in data and data[key] is None:
+                raise ValueError(f"{key} cannot be cleared")
+        return data
+
+
+class TripStopCreateBody(TripStopCreate):
+    """POST /trips/{id}/days/{did}/stops body. Same fields as TripStopCreate
+    plus optional sort_order. Omit sort_order to append; provide it to insert
+    at a position (existing stops at >= that position are shifted up by 1)."""
+    sort_order: int | None = Field(default=None, ge=0)
+
+
+class TripDayCreateBody(BaseModel):
+    """POST /trips/{id}/days body. day_number is required; the client picks
+    it (so renumbering is the client's responsibility, and bugs are loud).
+    stops can be empty — decoupled from create-trip context which requires
+    at least one stop per day."""
+    model_config = ConfigDict(extra="forbid")
+    day_number: int = Field(ge=1)
+    title: str | None = None
+    base_city: str | None = None
+    stops: list[TripStopCreate] = Field(default_factory=list)
+
+
+class StopReorderItem(BaseModel):
+    stop_id: UUID
+    sort_order: int = Field(ge=0)
+
+
+class StopReorderBody(BaseModel):
+    """PATCH /trips/{id}/days/{did}/reorder body. Caller sends the COMPLETE
+    new ordering so the server can validate the set matches what's on disk."""
+    model_config = ConfigDict(extra="forbid")
+    order: list[StopReorderItem] = Field(min_length=1)
 
 
 class UpdatePreferencesRequest(BaseModel):

@@ -35,6 +35,13 @@ class RequestTrace:
     latency_ms: float
     model: str
     error: str | None
+    itinerary_emitted: bool = False
+    itinerary_days: int | None = None
+    # Set when Claude emitted an emit_itinerary tool block but it failed
+    # TripCreate validation. `itinerary_emitted` stays False on this path so
+    # success-rate dashboards remain accurate; this field is the signal that
+    # the model attempted to emit a structured plan and we rejected it.
+    itinerary_validation_error: str | None = None
 
 
 def log_trace(trace: RequestTrace) -> None:

@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 
@@ -15,6 +16,8 @@ from app.services.conversation_service import (
     generate_title,
     maybe_summarize,
 )
+from app.services.itinerary_tool import ITINERARY_TOOL
+from app.services.itinerary_validator import validate_itinerary
 from app.services.telemetry import (
     RequestTrace,
     log_trace,
@@ -47,6 +50,9 @@ async def chat_stream(
         input_tokens: int | None = None
         output_tokens: int | None = None
         assistant_text: str | None = None
+        itinerary_emitted: bool = False
+        itinerary_days: int | None = None
+        itinerary_validation_error: str | None = None
         try:
             if ctx.new_conversation_id is not None:
                 yield f"event: conversation_id\ndata: {ctx.new_conversation_id}\n\n"
@@ -57,6 +63,7 @@ async def chat_stream(
                 max_tokens=2048,
                 system=ctx.system_prompt,
                 messages=ctx.messages,
+                tools=[ITINERARY_TOOL],
             ) as response:
                 async for text in response.text_stream:
                     yield encode_sse_text(text)
@@ -70,6 +77,50 @@ async def chat_stream(
                     assistant_text = "".join(
                         b.text for b in final.content if b.type == "text"
                     )
+                    # Stream emit_itinerary tool_use blocks as structured SSE
+                    # events, gated by a Pydantic validator. The Anthropic API
+                    # does not enforce the tool's input_schema, so a missing
+                    # field or out-of-enum kind would otherwise break the
+                    # Flutter parser mid-stream. On validation failure we emit
+                    # `event: itinerary_invalid` with a one-line reason instead
+                    # of a corrupt itinerary; the natural-language reply
+                    # already streamed and stays useful. Lands BEFORE [DONE]
+                    # because we're still inside the `async with`; the response
+                    # is alive and Starlette has not yet cancelled the
+                    # generator. Wrapped in the same try as the token-count
+                    # capture so a validator bug cannot crash the request.
+                    # TODO: auto-persist the validated payload into the `trips`
+                    # table once the schema and ownership model land.
+                    for block in final.content:
+                        if block.type != "tool_use" or block.name != "emit_itinerary":
+                            continue
+                        # Capture raw day count even on rejection — distinguishes
+                        # "Claude tried a 5-day plan we rejected" from "Claude
+                        # emitted no plan" in telemetry.
+                        raw_days = (
+                            block.input.get("days")
+                            if isinstance(block.input, dict)
+                            else None
+                        )
+                        if isinstance(raw_days, list):
+                            itinerary_days = len(raw_days)
+                        result = validate_itinerary(block.input)
+                        if result.ok:
+                            itinerary_emitted = True
+                            yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
+                        else:
+                            itinerary_validation_error = result.error
+                            error_payload = json.dumps({"reason": result.error})
+                            yield f"event: itinerary_invalid\ndata: {error_payload}\n\n"
+                            logger.warning(
+                                "itinerary validation failed: %s | raw=%s",
+                                result.error,
+                                json.dumps(result.raw)[:500],
+                            )
+                        # One itinerary per turn — the Flutter side overwrites
+                        # `asst.itinerary` on each event, so emitting more than
+                        # one would be discarded anyway.
+                        break
                 except Exception:
                     input_tokens = None
                     output_tokens = None
@@ -127,6 +178,9 @@ async def chat_stream(
                 latency_ms=(time.perf_counter() - started_at) * 1000,
                 model=settings.model_chat,
                 error=None,
+                itinerary_emitted=itinerary_emitted,
+                itinerary_days=itinerary_days,
+                itinerary_validation_error=itinerary_validation_error,
             ))
         except Exception as e:
             log_trace(RequestTrace(
@@ -142,6 +196,9 @@ async def chat_stream(
                 latency_ms=(time.perf_counter() - started_at) * 1000,
                 model=settings.model_chat,
                 error=str(e),
+                itinerary_emitted=itinerary_emitted,
+                itinerary_days=itinerary_days,
+                itinerary_validation_error=itinerary_validation_error,
             ))
             yield f"event: error\ndata: {str(e)}\n\n"
 

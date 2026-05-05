@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Index
+from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Date, Index, CheckConstraint, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, TSVECTOR
 from sqlalchemy.orm import declarative_base, relationship
 from pgvector.sqlalchemy import Vector
@@ -173,22 +173,85 @@ class Conversation(Base):
 
 
 class Trip(Base):
+    """Normalized itinerary owned by a user. Children: TripDay → TripStop.
+
+    Pre-launch the prior `place_id`/`itinerary JSONB` columns were dropped
+    in migration 011; nothing in the codebase references them anymore.
+    """
     __tablename__ = "trips"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    place_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("places.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
-    )
     title = Column(String, nullable=False)
-    itinerary = Column(JSONB, default=dict)
+    summary = Column(Text, nullable=True)
+    start_date = Column(Date, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     user = relationship("User", back_populates="trips")
+    days = relationship(
+        "TripDay",
+        back_populates="trip",
+        cascade="all, delete-orphan",
+        order_by="TripDay.day_number",
+    )
+
+
+class TripDay(Base):
+    __tablename__ = "trip_days"
+    __table_args__ = (
+        UniqueConstraint("trip_id", "day_number", name="trip_days_trip_day_uniq"),
+        CheckConstraint("day_number >= 1", name="trip_days_day_number_positive"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trip_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trips.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    day_number = Column(Integer, nullable=False)
+    title = Column(String, nullable=True)
+    base_city = Column(String, nullable=True)
+
+    trip = relationship("Trip", back_populates="days")
+    stops = relationship(
+        "TripStop",
+        back_populates="day",
+        cascade="all, delete-orphan",
+        order_by="TripStop.sort_order",
+    )
+
+
+class TripStop(Base):
+    __tablename__ = "trip_stops"
+    __table_args__ = (
+        UniqueConstraint("trip_day_id", "sort_order", name="trip_stops_day_order_uniq"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trip_day_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trip_days.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sort_order = Column(Integer, nullable=False)
+    name = Column(String, nullable=False)
+    kind = Column(String, nullable=False)
+    city = Column(String, nullable=True)
+    address = Column(Text, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    arrival_time = Column(String, nullable=True)
+    end_time = Column(String, nullable=True)
+    transportation = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    google_place_id = Column(String, nullable=True)
+
+    day = relationship("TripDay", back_populates="stops")
 
 
 Index(

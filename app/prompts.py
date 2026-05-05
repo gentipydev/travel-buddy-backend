@@ -63,11 +63,24 @@ Treat stored preferences as a starting point, never as a constraint.
 """
 
 
+_ITINERARY_TOOL_ADDENDUM = """
+
+When the user asks for a multi-day plan or day-by-day schedule, call the
+`emit_itinerary` tool with the structured plan AND write a brief warm
+intro/outro in the same reply. Never call the tool silently. Never call
+it for single recommendations, factual questions, greetings, opinions,
+or trivial single-day asks — for those, respond with text only.
+Use `day_number` (1-indexed) per day; only set `start_date` when the user
+names a concrete calendar start; only set per-stop `address` if you are
+confident in the exact street address.
+"""
+
+
 def build_system_prompt(preferences: UserPreferences | None) -> str:
     # Case 1: no preferences row at all.
     # Case 2: row exists but nothing meaningful is set.
     if preferences is None or not preferences.has_preferences():
-        return BASE_SYSTEM_PROMPT + _INFERENCE_ADDENDUM
+        return BASE_SYSTEM_PROMPT + _INFERENCE_ADDENDUM + _ITINERARY_TOOL_ADDENDUM
 
     # Case 3: preferences exist — inject as defaults with override reminder.
     return (
@@ -75,4 +88,5 @@ def build_system_prompt(preferences: UserPreferences | None) -> str:
         "User preferences (defaults only — see override rule below):\n"
         f"{preferences.to_prompt()}"
         f"{_OVERRIDE_REMINDER}"
+        f"{_ITINERARY_TOOL_ADDENDUM}"
     )
