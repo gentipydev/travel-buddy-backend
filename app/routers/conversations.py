@@ -27,6 +27,7 @@ async def list_conversations(
         {
             "id": str(c.id),
             "title": c.title,
+            "trip_id": str(c.trip_id) if c.trip_id else None,
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
             "message_count": len(c.messages or []),
@@ -53,6 +54,7 @@ async def get_conversation(
     return {
         "id": str(conv.id),
         "title": conv.title,
+        "trip_id": str(conv.trip_id) if conv.trip_id else None,
         "summary": conv.summary,
         "messages": list(conv.messages or []),
         "created_at": conv.created_at.isoformat() if conv.created_at else None,

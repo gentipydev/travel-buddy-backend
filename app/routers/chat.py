@@ -24,6 +24,7 @@ from app.services.telemetry import (
     new_request_id,
     utc_now_iso,
 )
+from app.services.trips_service import _serialize, replace_trip_from_payload
 from app.sse import encode_sse_text
 
 
@@ -106,8 +107,48 @@ async def chat_stream(
                             itinerary_days = len(raw_days)
                         result = validate_itinerary(block.input)
                         if result.ok:
-                            itinerary_emitted = True
-                            yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
+                            if ctx.refine_trip is not None:
+                                # Refine path: apply the validated payload to
+                                # the saved trip in-place and ship the canonical
+                                # post-replace Trip back to the client. The
+                                # inner try is required — the outer except
+                                # below silently zeroes tokens, so a refine
+                                # failure that fell through there would leave
+                                # the client believing the refine succeeded.
+                                # Commit BEFORE yielding `trip_refined` so the
+                                # client's "this is the new state" trust is
+                                # actually durable. The later `append_messages`
+                                # path runs a second commit for the chat turn;
+                                # if it fails we emit `persist_failed` (the
+                                # trip stays refined — known split per plan).
+                                try:
+                                    updated = await replace_trip_from_payload(
+                                        db,
+                                        trip_id=ctx.refine_trip.id,
+                                        user_id=ctx.refine_trip.user_id,
+                                        payload=result.payload,
+                                    )
+                                    await db.commit()
+                                    itinerary_emitted = True
+                                    yield (
+                                        "event: trip_refined\n"
+                                        f"data: {json.dumps(_serialize(updated))}\n\n"
+                                    )
+                                except Exception:
+                                    # Roll back any partial flush so the next
+                                    # statement (e.g. append_messages) starts
+                                    # in a clean transaction.
+                                    await db.rollback()
+                                    logger.exception("refine apply failed")
+                                    yield (
+                                        "event: refine_failed\n"
+                                        "data: " + json.dumps(
+                                            {"reason": "could not apply refinement"}
+                                        ) + "\n\n"
+                                    )
+                            else:
+                                itinerary_emitted = True
+                                yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
                         else:
                             itinerary_validation_error = result.error
                             error_payload = json.dumps({"reason": result.error})
@@ -181,6 +222,7 @@ async def chat_stream(
                 itinerary_emitted=itinerary_emitted,
                 itinerary_days=itinerary_days,
                 itinerary_validation_error=itinerary_validation_error,
+                trip_refine=ctx.refine_trip is not None,
             ))
         except Exception as e:
             log_trace(RequestTrace(
@@ -199,6 +241,7 @@ async def chat_stream(
                 itinerary_emitted=itinerary_emitted,
                 itinerary_days=itinerary_days,
                 itinerary_validation_error=itinerary_validation_error,
+                trip_refine=ctx.refine_trip is not None,
             ))
             yield f"event: error\ndata: {str(e)}\n\n"
 

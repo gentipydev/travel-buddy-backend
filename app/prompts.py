@@ -1,3 +1,5 @@
+import json
+
 from app.db.models import UserPreferences
 
 
@@ -73,20 +75,104 @@ or trivial single-day asks — for those, respond with text only.
 Use `day_number` (1-indexed) per day; only set `start_date` when the user
 names a concrete calendar start; only set per-stop `address` if you are
 confident in the exact street address.
+
+If the user explicitly asks for a multi-day itinerary ("plan me 3 days
+in X", "a 5-day trip itinerary", "day-by-day schedule for a week in Y"),
+DRAFT IT NOW — do not first ask which interests / vibe / budget / group
+size they want. Pick sensible defaults (mid-range budget, balanced mix
+of culture, food, and outdoor stops) and note them briefly in your intro
+so the user can redirect on the next turn. Asking preference questions
+before producing the plan is a violation of this rule, even when no
+preferences are stored.
 """
 
 
-def build_system_prompt(preferences: UserPreferences | None) -> str:
+_REFINE_ADDENDUM_TEMPLATE = """
+
+--- CURRENT TRIP CONTEXT ---
+
+The user is refining this saved trip. Treat the JSON below as the current
+state. When they ask for changes, emit the FULL updated itinerary via the
+emit_itinerary tool. Always include ALL days and stops, not just the
+changed ones — partial emissions are not supported. Preserve unchanged
+stops as-is unless the user's request implies otherwise. The tool input
+shape is identical to the saved trip's shape (without server metadata).
+
+Trip JSON:
+{trip_json}
+
+--- END TRIP CONTEXT ---
+
+IMPORTANT — when to call the emit_itinerary tool in this conversation:
+
+The tool call commits changes to the user's saved trip. Do NOT call it for
+exploratory or hypothetical questions. ONLY call it when the user has
+clearly asked you to update the trip.
+
+CALL the tool when the user says things like:
+  - "update the trip to..."
+  - "make those changes"
+  - "go ahead", "do it", "yes, update it"
+  - "swap X for Y" (direct imperative — they want it done)
+  - "add a beach day before day 2" (direct imperative)
+  - "remove the museum from day 1" (direct imperative)
+  - "save this version" / "apply this"
+
+DO NOT call the tool when the user says things like:
+  - "what would it look like if..."
+  - "what do you think about adding..."
+  - "could we maybe..."
+  - "I'm thinking about swapping..."
+  - "is there a way to..."
+  - "would day 2 work better as a beach day?"
+  - any question asking for your opinion or a comparison
+  - any message that ends in a question mark and isn't a direct command
+
+When in doubt, do NOT call the tool. Reply with text describing the
+proposed change and ask the user if they want you to apply it. It is much
+better to under-commit and ask than to over-commit and overwrite the
+user's saved trip.
+
+Edge cases:
+  - "actually, never mind" / "wait, don't" → do NOT call the tool, even
+    if a previous turn was building up to a change.
+  - User asks for a change, you ask a clarifying question, user answers
+    → if the answer resolves the clarification AND the original ask was
+    a direct command, call the tool. If they're still negotiating
+    details, keep talking.
+  - "can you..." is ambiguous in English ("are you able" vs. "please do").
+    Treat as a command only when the surrounding context is clearly
+    directive ("can you swap X for Y" with no hedging = command; "can
+    you think about swapping X" = exploratory).
+"""
+
+
+def build_system_prompt(
+    preferences: UserPreferences | None,
+    trip_context: dict | None = None,
+) -> str:
     # Case 1: no preferences row at all.
     # Case 2: row exists but nothing meaningful is set.
     if preferences is None or not preferences.has_preferences():
-        return BASE_SYSTEM_PROMPT + _INFERENCE_ADDENDUM + _ITINERARY_TOOL_ADDENDUM
+        prompt = (
+            BASE_SYSTEM_PROMPT + _INFERENCE_ADDENDUM + _ITINERARY_TOOL_ADDENDUM
+        )
+    else:
+        # Case 3: preferences exist — inject as defaults with override reminder.
+        prompt = (
+            f"{BASE_SYSTEM_PROMPT}\n\n"
+            "User preferences (defaults only — see override rule below):\n"
+            f"{preferences.to_prompt()}"
+            f"{_OVERRIDE_REMINDER}"
+            f"{_ITINERARY_TOOL_ADDENDUM}"
+        )
 
-    # Case 3: preferences exist — inject as defaults with override reminder.
-    return (
-        f"{BASE_SYSTEM_PROMPT}\n\n"
-        "User preferences (defaults only — see override rule below):\n"
-        f"{preferences.to_prompt()}"
-        f"{_OVERRIDE_REMINDER}"
-        f"{_ITINERARY_TOOL_ADDENDUM}"
-    )
+    if trip_context is not None:
+        # `indent=2` adds a few hundred tokens of structure that materially
+        # improves Claude's adherence to the trip shape on full re-emit. The
+        # gating phrasing below the JSON is load-bearing — it's the entire
+        # commit-vs-explore confirmation surface (no client-side dialog).
+        prompt += _REFINE_ADDENDUM_TEMPLATE.format(
+            trip_json=json.dumps(trip_context, indent=2)
+        )
+    return prompt

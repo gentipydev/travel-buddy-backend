@@ -17,59 +17,17 @@ from app.schemas import (
     TripStopUpdate,
     TripUpdate,
 )
+from app.services.trips_service import (
+    _load_trip,
+    _serialize,
+    get_or_create_refine_conversation,
+    replace_trip_from_payload,
+)
 
 # TODO(tests): pytest scaffolding deferred to a follow-up PR — see
 # manual curl smoke test recipes in the trip editing plan.
 
 router = APIRouter(prefix="/trips", tags=["trips"])
-
-
-def _serialize(trip: Trip) -> dict:
-    return {
-        "id": str(trip.id),
-        "title": trip.title,
-        "summary": trip.summary,
-        "start_date": trip.start_date.isoformat() if trip.start_date else None,
-        "created_at": trip.created_at.isoformat() if trip.created_at else "",
-        "updated_at": trip.updated_at.isoformat() if trip.updated_at else "",
-        "days": [
-            {
-                "id": str(day.id),
-                "day_number": day.day_number,
-                "title": day.title,
-                "base_city": day.base_city,
-                "stops": [
-                    {
-                        "id": str(stop.id),
-                        "sort_order": stop.sort_order,
-                        "name": stop.name,
-                        "kind": stop.kind,
-                        "city": stop.city,
-                        "address": stop.address,
-                        "duration_minutes": stop.duration_minutes,
-                        "arrival_time": stop.arrival_time,
-                        "end_time": stop.end_time,
-                        "transportation": stop.transportation,
-                        "notes": stop.notes,
-                        "lat": stop.lat,
-                        "lng": stop.lng,
-                        "google_place_id": stop.google_place_id,
-                    }
-                    for stop in day.stops
-                ],
-            }
-            for day in trip.days
-        ],
-    }
-
-
-async def _load_trip(db: AsyncSession, trip_id: UUID, user_id: int) -> Trip | None:
-    result = await db.execute(
-        select(Trip)
-        .where(Trip.id == trip_id, Trip.user_id == user_id)
-        .options(selectinload(Trip.days).selectinload(TripDay.stops))
-    )
-    return result.unique().scalar_one_or_none()
 
 
 async def _load_day(
@@ -414,3 +372,51 @@ async def reorder_stops(
     if refreshed is None:
         raise HTTPException(status_code=500, detail="Trip vanished after reorder")
     return _serialize(refreshed)
+
+
+@router.put("/{trip_id}", response_model=TripOut)
+async def replace_trip(
+    trip_id: UUID,
+    payload: TripCreate,
+    user: User = Depends(require_local_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Full replacement of a trip's days/stops. Same body shape as POST /trips,
+    so the Flutter `ItineraryDraft.toCreatePayload` is reusable. The trip's id,
+    created_at, and any associated conversation are preserved; everything else
+    is wiped and rebuilt. Stop ids change on every replace — the response is
+    the new source of truth."""
+    updated = await replace_trip_from_payload(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        payload=payload.model_dump(mode="json"),
+    )
+    await db.commit()
+    return _serialize(updated)
+
+
+@router.post("/{trip_id}/conversation")
+async def get_or_create_conversation_for_trip(
+    trip_id: UUID,
+    user: User = Depends(require_local_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Idempotent: return the (existing or newly-created) chat conversation
+    bound to this trip. The Flutter `Refine with Buddy` button calls this
+    eagerly so the chat screen can hydrate prior history before sending the
+    first refine message."""
+    trip = await _load_trip(db, trip_id, user.id)
+    if trip is None:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    conv = await get_or_create_refine_conversation(
+        db, trip=trip, user_id=user.id
+    )
+    await db.commit()
+    return {
+        "id": str(conv.id),
+        "title": conv.title,
+        "trip_id": str(conv.trip_id) if conv.trip_id else None,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+    }

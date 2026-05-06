@@ -29,6 +29,13 @@ class ChatRequest(BaseModel):
     # When provided alongside an authenticated user, server-side history
     # supersedes `conversation_history`. Anonymous requests ignore this field.
     conversation_id: UUID | None = None
+    # When set, this turn refines the named saved trip. The pipeline loads the
+    # trip (auth-checked), injects its serialized state into the system prompt,
+    # auto-resolves the 1:1 conversation if `conversation_id` is omitted, and
+    # if Claude calls `emit_itinerary` will replace the trip in place rather
+    # than emitting an unsaved itinerary card. Anonymous requests are rejected
+    # with 404 (no local user, nothing to refine).
+    trip_id: UUID | None = None
 
 
 class TripStopCreate(BaseModel):

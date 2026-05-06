@@ -42,6 +42,11 @@ class RequestTrace:
     # success-rate dashboards remain accurate; this field is the signal that
     # the model attempted to emit a structured plan and we rejected it.
     itinerary_validation_error: str | None = None
+    # True when the request carried a `trip_id` and the pipeline ran in
+    # "Refine with Buddy" mode. Lets us measure refinement vs. fresh planning
+    # rates independently of itinerary_emitted (the model may chat without
+    # committing a tool call on a refine turn).
+    trip_refine: bool = False
 
 
 def log_trace(trace: RequestTrace) -> None:

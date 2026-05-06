@@ -10,10 +10,11 @@ import logging
 from dataclasses import dataclass
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Conversation, User, UserPreferences
+from app.db.models import Conversation, Trip, User, UserPreferences
 from app.prompts import build_system_prompt
 from app.schemas import ChatRequest
 from app.services.conversation_service import (
@@ -22,6 +23,11 @@ from app.services.conversation_service import (
 )
 from app.services.place_service import detect_place, to_card_dict
 from app.services.rag_service import retrieve_chunks
+from app.services.trips_service import (
+    _load_trip,
+    get_or_create_refine_conversation,
+    serialize_trip_for_context,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +43,11 @@ class ChatTurnContext:
     retrieval_used: bool
     chunks_returned: int
     top_rerank_score: float | None
+    # Set when the request carried `trip_id` and refine mode is active. The
+    # chat router branches on this to apply the validated emit_itinerary
+    # payload back to the saved trip in place and emit `event: trip_refined`
+    # instead of the unsaved-itinerary `event: itinerary`.
+    refine_trip: Trip | None = None
 
 
 async def prepare_turn(
@@ -71,23 +82,59 @@ async def prepare_turn(
         local_user is not None,
     )
 
+    # Refine mode: load the trip first (auth-checked) so the resolved
+    # conversation MUST be the trip's 1:1 conversation, regardless of what
+    # `conversation_id` the client sent.
+    refine_trip: Trip | None = None
+    if request.trip_id is not None:
+        if local_user is None:
+            # Anonymous refines have nothing to refine; refuse rather than
+            # leak existence.
+            raise HTTPException(status_code=404, detail="Trip not found")
+        refine_trip = await _load_trip(db, request.trip_id, local_user.id)
+        if refine_trip is None:
+            # Hard auth boundary: do not distinguish "wrong owner" from
+            # "doesn't exist". A guessed UUID must reveal nothing.
+            raise HTTPException(status_code=404, detail="Trip not found")
+
     conversation: Conversation | None = None
     new_conversation_id: UUID | None = None
     if local_user is not None:
-        conversation = await get_or_create_conversation(
-            db, request.conversation_id, local_user.id
-        )
-        if request.conversation_id is None:
-            # Title comes from the first 6 words of the opening message; only
-            # set on creation so revisiting the conversation can't rewrite it.
-            conversation.title = " ".join(request.message.split()[:6]) or None
-            new_conversation_id = conversation.id
+        if refine_trip is not None:
+            # Auto-resolve: regardless of which conversation_id the client
+            # sent, the refine turn lands in the trip's 1:1 conversation.
+            existing_id_provided = request.conversation_id is not None
+            conversation = await get_or_create_refine_conversation(
+                db, trip=refine_trip, user_id=local_user.id
+            )
+            if existing_id_provided and conversation.id != request.conversation_id:
+                # Sent a conversation_id that doesn't belong to this trip —
+                # fail loud rather than silently rewriting the wrong thread.
+                raise HTTPException(
+                    status_code=400,
+                    detail="trip_id does not match conversation's trip_id",
+                )
+            if not existing_id_provided:
+                new_conversation_id = conversation.id
+        else:
+            conversation = await get_or_create_conversation(
+                db, request.conversation_id, local_user.id
+            )
+            if request.conversation_id is None:
+                # Title comes from the first 6 words of the opening message;
+                # only set on creation so revisiting the conversation can't
+                # rewrite it.
+                conversation.title = " ".join(request.message.split()[:6]) or None
+                new_conversation_id = conversation.id
         # Commit eagerly so the id we yield in the SSE event is durable even
         # if the stream errors mid-flight.
         await db.commit()
         await db.refresh(conversation)
 
-    system_prompt = build_system_prompt(preferences)
+    trip_context = (
+        serialize_trip_for_context(refine_trip) if refine_trip is not None else None
+    )
+    system_prompt = build_system_prompt(preferences, trip_context=trip_context)
 
     if conversation is not None:
         history = build_history(conversation)
@@ -141,4 +188,5 @@ async def prepare_turn(
         retrieval_used=retrieval_used,
         chunks_returned=chunks_returned,
         top_rerank_score=top_rerank_score,
+        refine_trip=refine_trip,
     )

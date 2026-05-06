@@ -165,11 +165,23 @@ class Conversation(Base):
         nullable=True,
         index=True,
     )
+    # 1:1 link to a saved trip when this conversation was opened via "Refine
+    # with Buddy". NULL for regular chat. Partial unique index lives in
+    # migration 012; ON DELETE SET NULL preserves history if the trip is
+    # deleted.
+    trip_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trips.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title = Column(String, nullable=True)
     messages = Column(JSONB, nullable=False, default=list)
     summary = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    trip = relationship("Trip", back_populates="conversation", uselist=False)
 
 
 class Trip(Base):
@@ -194,6 +206,14 @@ class Trip(Base):
         back_populates="trip",
         cascade="all, delete-orphan",
         order_by="TripDay.day_number",
+    )
+    # Refine-with-Buddy conversation, if one was created. Do NOT cascade
+    # delete — the FK on Conversation.trip_id is ON DELETE SET NULL, so the
+    # chat history survives a trip deletion.
+    conversation = relationship(
+        "Conversation",
+        back_populates="trip",
+        uselist=False,
     )
 
 

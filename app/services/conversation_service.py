@@ -108,14 +108,24 @@ async def get_or_create_conversation(
         if conv is not None:
             return conv
 
+    # Refine-with-Buddy conversations are coupled 1:1 to a saved trip; aging
+    # one out would silently delete chat history the user expected to find
+    # next time they tap "Refine with Buddy" on that trip. Exempt them from
+    # the cap — both for counting and for selecting the eviction target.
     count_result = await db.execute(
-        select(func.count()).where(Conversation.user_id == user_id)
+        select(func.count()).where(
+            Conversation.user_id == user_id,
+            Conversation.trip_id.is_(None),
+        )
     )
     count = count_result.scalar_one()
     if count >= _MAX_CONVERSATIONS_PER_USER:
         oldest_result = await db.execute(
             select(Conversation.id)
-            .where(Conversation.user_id == user_id)
+            .where(
+                Conversation.user_id == user_id,
+                Conversation.trip_id.is_(None),
+            )
             .order_by(Conversation.created_at.asc())
             .limit(1)
         )
