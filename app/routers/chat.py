@@ -61,7 +61,15 @@ async def chat_stream(
                 yield f"event: place_card\ndata: {ctx.place_card_payload}\n\n"
             async with client.messages.stream(
                 model=settings.model_chat,
-                max_tokens=2048,
+                # 8192 fits ~12-day itineraries with 6 stops/day plus the
+                # intro/outro paragraph. The previous 2048 cap was hitting
+                # `stop_reason: max_tokens` mid-tool-call, leaving Claude's
+                # `emit_itinerary` input with a missing `days` field and
+                # triggering an `itinerary_invalid` ("days: Field required")
+                # on what should have been a healthy plan. Real itineraries
+                # rarely need more than this and we only pay for tokens
+                # actually generated, so a higher ceiling is mostly free.
+                max_tokens=8192,
                 system=ctx.system_prompt,
                 messages=ctx.messages,
                 tools=[ITINERARY_TOOL],
@@ -151,12 +159,28 @@ async def chat_stream(
                                 yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
                         else:
                             itinerary_validation_error = result.error
-                            error_payload = json.dumps({"reason": result.error})
+                            # Surface raw input keys + stop_reason on the wire
+                            # so the Flutter client logs can distinguish "Claude
+                            # truncated mid-tool-call" (stop_reason=max_tokens,
+                            # missing days/stops) from "Claude emitted shape we
+                            # didn't expect" (stop_reason=tool_use, but with
+                            # bad enum/format). Cheap diagnostic — always-on.
+                            raw_keys = (
+                                sorted(block.input.keys())
+                                if isinstance(block.input, dict)
+                                else None
+                            )
+                            error_payload = json.dumps({
+                                "reason": result.error,
+                                "stop_reason": getattr(final, "stop_reason", None),
+                                "raw_keys": raw_keys,
+                            })
                             yield f"event: itinerary_invalid\ndata: {error_payload}\n\n"
                             logger.warning(
-                                "itinerary validation failed: %s | raw=%s",
+                                "itinerary validation failed: %s | stop_reason=%s | raw=%s",
                                 result.error,
-                                json.dumps(result.raw)[:500],
+                                getattr(final, "stop_reason", None),
+                                json.dumps(result.raw)[:1500],
                             )
                         # One itinerary per turn — the Flutter side overwrites
                         # `asst.itinerary` on each event, so emitting more than
