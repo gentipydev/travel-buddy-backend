@@ -80,47 +80,63 @@ async def create_trip(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    trip = Trip(
-        user_id=user.id,
-        title=payload.title,
-        summary=payload.summary,
-        start_date=payload.start_date,
-    )
-    for day in payload.days:
-        trip_day = TripDay(
-            day_number=day.day_number,
-            title=day.title,
-            base_city=day.base_city,
-        )
-        for index, stop in enumerate(day.stops):
-            trip_day.stops.append(
-                TripStop(
-                    sort_order=index,
-                    name=stop.name,
-                    kind=stop.kind,
-                    city=stop.city,
-                    address=stop.address,
-                    duration_minutes=stop.duration_minutes,
-                    arrival_time=stop.arrival_time,
-                    end_time=stop.end_time,
-                    transportation=stop.transportation,
-                    notes=stop.notes,
-                    lat=stop.lat,
-                    lng=stop.lng,
-                    google_place_id=stop.google_place_id,
-                )
-            )
-        trip.days.append(trip_day)
-    db.add(trip)
-    # Wrap commit so a constraint violation or driver error surfaces a
-    # diagnosable response instead of a generic 500. The full traceback
-    # still lands in the server logs; the response detail is short.
+    # Wrap the WHOLE handler so any exception (commit, _load_trip,
+    # _serialize, ORM relationship access, lazy-load mistake) surfaces a
+    # JSON response with the exception type+message instead of an opaque
+    # plain-text "Internal Server Error". Full traceback still lands in
+    # server logs via logger.exception.
     try:
+        trip = Trip(
+            user_id=user.id,
+            title=payload.title,
+            summary=payload.summary,
+            start_date=payload.start_date,
+        )
+        for day in payload.days:
+            trip_day = TripDay(
+                day_number=day.day_number,
+                title=day.title,
+                base_city=day.base_city,
+            )
+            for index, stop in enumerate(day.stops):
+                trip_day.stops.append(
+                    TripStop(
+                        sort_order=index,
+                        name=stop.name,
+                        kind=stop.kind,
+                        city=stop.city,
+                        address=stop.address,
+                        duration_minutes=stop.duration_minutes,
+                        arrival_time=stop.arrival_time,
+                        end_time=stop.end_time,
+                        transportation=stop.transportation,
+                        notes=stop.notes,
+                        lat=stop.lat,
+                        lng=stop.lng,
+                        google_place_id=stop.google_place_id,
+                    )
+                )
+            trip.days.append(trip_day)
+        db.add(trip)
         await db.commit()
+
+        refreshed = await _load_trip(db, trip.id, user.id)
+        if refreshed is None:
+            # Should be impossible — we just committed it. Defensive.
+            raise HTTPException(
+                status_code=500, detail="Trip not found after create"
+            )
+        return _serialize(refreshed)
+    except HTTPException:
+        # Already a structured FastAPI error — let it through unchanged.
+        raise
     except Exception as exc:
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         logger.exception(
-            "create_trip commit failed user_id=%s days=%d",
+            "create_trip failed user_id=%s days=%d",
             user.id,
             len(payload.days),
         )
@@ -128,12 +144,6 @@ async def create_trip(
             status_code=500,
             detail=f"create_trip failed: {type(exc).__name__}: {exc}",
         )
-
-    refreshed = await _load_trip(db, trip.id, user.id)
-    if refreshed is None:
-        # Should be impossible — we just committed it. Defensive.
-        raise HTTPException(status_code=500, detail="Trip not found after create")
-    return _serialize(refreshed)
 
 
 @router.get("", response_model=list[TripOut])
