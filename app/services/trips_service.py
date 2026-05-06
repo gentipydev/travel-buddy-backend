@@ -387,6 +387,22 @@ async def apply_reorder_stops(
             detail="sort_order values must be 0..N-1 contiguous",
         )
     new_order = {sid: so for sid, so in parsed_order}
+    # Two-phase update to dodge mid-statement UNIQUE(trip_day_id, sort_order)
+    # violations on a permutation. Despite the docs implying constraints are
+    # checked at end-of-statement, PostgreSQL evaluates non-deferrable UNIQUE
+    # per-row during UPDATE — so a swap (e.g. row at sort_order=1 → 2 while
+    # row at sort_order=2 still sits at 2) fails the moment the first row
+    # collides. Shifting every stop in the day into a disjoint negative range
+    # first guarantees the positive 0..N-1 target range is free for phase 2.
+    # Validation above ensures `current_ids == body_ids`, so every row in the
+    # day is addressed by the CASE in phase 2 (no row gets NULL from a
+    # missing WHEN branch).
+    SHIFT = 1_000_000
+    await db.execute(
+        update(TripStop)
+        .where(TripStop.trip_day_id == day.id)
+        .values(sort_order=TripStop.sort_order - SHIFT)
+    )
     await db.execute(
         update(TripStop)
         .where(TripStop.trip_day_id == day.id)
