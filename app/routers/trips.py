@@ -80,6 +80,10 @@ async def create_trip(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
+    # Snapshot scalar fields before any DB op so the except branch can log
+    # without triggering a lazy attribute load on an expired/failed session
+    # (that would raise `MissingGreenlet` and mask the real exception).
+    user_id_for_log = user.id
     # Wrap the WHOLE handler so any exception (commit, _load_trip,
     # _serialize, ORM relationship access, lazy-load mistake) surfaces a
     # JSON response with the exception type+message instead of an opaque
@@ -137,7 +141,7 @@ async def create_trip(
             pass
         logger.exception(
             "create_trip failed user_id=%s days=%d",
-            user.id,
+            user_id_for_log,
             len(payload.days),
         )
         raise HTTPException(
