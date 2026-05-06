@@ -18,6 +18,11 @@ from app.services.conversation_service import (
 )
 from app.services.itinerary_tool import ITINERARY_TOOL
 from app.services.itinerary_validator import validate_itinerary
+from app.services.refine_tools import (
+    REFINE_TOOL_NAMES,
+    REFINE_TOOLS,
+    apply_refine_tool,
+)
 from app.services.telemetry import (
     RequestTrace,
     log_trace,
@@ -59,6 +64,15 @@ async def chat_stream(
                 yield f"event: conversation_id\ndata: {ctx.new_conversation_id}\n\n"
             if ctx.place_card_payload is not None:
                 yield f"event: place_card\ndata: {ctx.place_card_payload}\n\n"
+            # Refine turns get the surgical patch tools too (update_stop,
+            # delete_stop, …). Initial creation / open chat keeps just
+            # emit_itinerary so a casual planner can't accidentally edit a
+            # trip they aren't scoped to.
+            available_tools = (
+                [ITINERARY_TOOL, *REFINE_TOOLS]
+                if ctx.refine_trip is not None
+                else [ITINERARY_TOOL]
+            )
             async with client.messages.stream(
                 model=settings.model_chat,
                 # 8192 fits ~12-day itineraries with 6 stops/day plus the
@@ -69,10 +83,12 @@ async def chat_stream(
                 # on what should have been a healthy plan. Real itineraries
                 # rarely need more than this and we only pay for tokens
                 # actually generated, so a higher ceiling is mostly free.
+                # Refine patch tools are O(edit-size), so this ceiling no
+                # longer scales with trip size for incremental edits.
                 max_tokens=8192,
                 system=ctx.system_prompt,
                 messages=ctx.messages,
-                tools=[ITINERARY_TOOL],
+                tools=available_tools,
             ) as response:
                 async for text in response.text_stream:
                     yield encode_sse_text(text)
@@ -100,9 +116,23 @@ async def chat_stream(
                     # capture so a validator bug cannot crash the request.
                     # TODO: auto-persist the validated payload into the `trips`
                     # table once the schema and ownership model land.
-                    for block in final.content:
-                        if block.type != "tool_use" or block.name != "emit_itinerary":
-                            continue
+                    tool_use_blocks = [
+                        b for b in final.content if b.type == "tool_use"
+                    ]
+                    emit_block = next(
+                        (b for b in tool_use_blocks if b.name == "emit_itinerary"),
+                        None,
+                    )
+                    refine_blocks = [
+                        b for b in tool_use_blocks if b.name in REFINE_TOOL_NAMES
+                    ]
+
+                    if emit_block is not None:
+                        # Whole-trip rewrite path. If Claude also emitted patch
+                        # tools in the same turn (rare; the prompt discourages
+                        # it), we ignore them — emit_itinerary's full replace
+                        # supersedes any narrow op.
+                        block = emit_block
                         # Capture raw day count even on rejection — distinguishes
                         # "Claude tried a 5-day plan we rejected" from "Claude
                         # emitted no plan" in telemetry.
@@ -182,10 +212,45 @@ async def chat_stream(
                                 getattr(final, "stop_reason", None),
                                 json.dumps(result.raw)[:1500],
                             )
-                        # One itinerary per turn — the Flutter side overwrites
-                        # `asst.itinerary` on each event, so emitting more than
-                        # one would be discarded anyway.
-                        break
+                    elif refine_blocks and ctx.refine_trip is not None:
+                        # Patch-tool refine path. Apply every tool call in
+                        # order within a single transaction; emit ONE
+                        # `trip_refined` with the canonical post-state once
+                        # all ops have landed. On any failure roll the whole
+                        # turn back — never half-apply.
+                        try:
+                            latest = None
+                            for block in refine_blocks:
+                                raw_input = (
+                                    block.input
+                                    if isinstance(block.input, dict)
+                                    else {}
+                                )
+                                latest = await apply_refine_tool(
+                                    db,
+                                    trip_id=ctx.refine_trip.id,
+                                    user_id=ctx.refine_trip.user_id,
+                                    name=block.name,
+                                    raw_input=raw_input,
+                                )
+                            await db.commit()
+                            itinerary_emitted = True
+                            yield (
+                                "event: trip_refined\n"
+                                f"data: {json.dumps(_serialize(latest))}\n\n"
+                            )
+                        except Exception as e:
+                            await db.rollback()
+                            logger.exception("refine patch apply failed")
+                            itinerary_validation_error = (
+                                f"{type(e).__name__}: {e}"[:500]
+                            )
+                            yield (
+                                "event: refine_failed\n"
+                                "data: " + json.dumps(
+                                    {"reason": "could not apply refinement"}
+                                ) + "\n\n"
+                            )
                 except Exception:
                     input_tokens = None
                     output_tokens = None

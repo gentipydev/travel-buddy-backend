@@ -2,14 +2,14 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import case, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
 
 from app.db.engine import get_session
-from app.db.models import Trip, TripDay, TripStop, User, utcnow
+from app.db.models import Trip, TripDay, TripStop, User
 from app.deps import require_local_user
 from app.schemas import (
     StopReorderBody,
@@ -23,6 +23,13 @@ from app.schemas import (
 from app.services.trips_service import (
     _load_trip,
     _serialize,
+    apply_add_day,
+    apply_delete_day,
+    apply_delete_stop,
+    apply_insert_stop,
+    apply_reorder_stops,
+    apply_update_stop,
+    apply_update_trip,
     get_or_create_refine_conversation,
     replace_trip_from_payload,
 )
@@ -31,47 +38,6 @@ from app.services.trips_service import (
 # manual curl smoke test recipes in the trip editing plan.
 
 router = APIRouter(prefix="/trips", tags=["trips"])
-
-
-async def _load_day(
-    db: AsyncSession, trip_id: UUID, day_id: UUID, user_id: int
-) -> TripDay | None:
-    result = await db.execute(
-        select(TripDay)
-        .join(Trip, Trip.id == TripDay.trip_id)
-        .where(
-            TripDay.id == day_id,
-            Trip.id == trip_id,
-            Trip.user_id == user_id,
-        )
-        .options(selectinload(TripDay.stops))
-    )
-    return result.unique().scalar_one_or_none()
-
-
-async def _load_stop(
-    db: AsyncSession, trip_id: UUID, stop_id: UUID, user_id: int
-) -> TripStop | None:
-    result = await db.execute(
-        select(TripStop)
-        .join(TripDay, TripDay.id == TripStop.trip_day_id)
-        .join(Trip, Trip.id == TripDay.trip_id)
-        .where(
-            TripStop.id == stop_id,
-            Trip.id == trip_id,
-            Trip.user_id == user_id,
-        )
-    )
-    return result.scalar_one_or_none()
-
-
-async def _touch_trip(db: AsyncSession, trip_id: UUID) -> None:
-    """Bump Trip.updated_at on child mutations. SQLAlchemy's `onupdate=utcnow`
-    only fires when the trip row itself is touched; for child mutations we
-    have to update it explicitly in the same transaction."""
-    await db.execute(
-        update(Trip).where(Trip.id == trip_id).values(updated_at=utcnow())
-    )
 
 
 @router.post("", response_model=TripOut, status_code=status.HTTP_201_CREATED)
@@ -201,17 +167,14 @@ async def update_trip(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    trip = await _load_trip(db, trip_id, user.id)
-    if trip is None:
-        raise HTTPException(status_code=404, detail="Trip not found")
-    for key, value in payload.model_dump(exclude_unset=True).items():
-        setattr(trip, key, value)
-    # `onupdate=utcnow` on Trip itself fires on the attribute changes above.
+    updated = await apply_update_trip(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        payload=payload.model_dump(exclude_unset=True),
+    )
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after update")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.post(
@@ -225,44 +188,14 @@ async def add_day(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    trip = await _load_trip(db, trip_id, user.id)
-    if trip is None:
-        raise HTTPException(status_code=404, detail="Trip not found")
-    if any(d.day_number == payload.day_number for d in trip.days):
-        raise HTTPException(
-            status_code=409, detail="day_number already exists"
-        )
-    new_day = TripDay(
-        trip_id=trip.id,
-        day_number=payload.day_number,
-        title=payload.title,
-        base_city=payload.base_city,
+    updated = await apply_add_day(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        payload=payload.model_dump(),
     )
-    for index, stop in enumerate(payload.stops):
-        new_day.stops.append(
-            TripStop(
-                sort_order=index,
-                name=stop.name,
-                kind=stop.kind,
-                city=stop.city,
-                address=stop.address,
-                duration_minutes=stop.duration_minutes,
-                arrival_time=stop.arrival_time,
-                end_time=stop.end_time,
-                transportation=stop.transportation,
-                notes=stop.notes,
-                lat=stop.lat,
-                lng=stop.lng,
-                google_place_id=stop.google_place_id,
-            )
-        )
-    db.add(new_day)
-    await _touch_trip(db, trip.id)
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after add_day")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.delete("/{trip_id}/days/{day_id}", response_model=TripOut)
@@ -272,16 +205,11 @@ async def delete_day(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    day = await _load_day(db, trip_id, day_id, user.id)
-    if day is None:
-        raise HTTPException(status_code=404, detail="Day not found")
-    await db.delete(day)
-    await _touch_trip(db, trip_id)
+    updated = await apply_delete_day(
+        db, trip_id=trip_id, user_id=user.id, day_id=day_id
+    )
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after delete_day")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.post(
@@ -296,33 +224,15 @@ async def add_stop(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    day = await _load_day(db, trip_id, day_id, user.id)
-    if day is None:
-        raise HTTPException(status_code=404, detail="Day not found")
-    body = payload.model_dump()
-    requested = body.pop("sort_order", None)
-    if requested is None:
-        next_sort = max((s.sort_order for s in day.stops), default=-1) + 1
-        new_stop = TripStop(trip_day_id=day.id, sort_order=next_sort, **body)
-    else:
-        # Shift existing stops at >= requested up by 1 in a SINGLE UPDATE so
-        # UNIQUE(trip_day_id, sort_order) is checked once at end-of-statement.
-        await db.execute(
-            update(TripStop)
-            .where(
-                TripStop.trip_day_id == day.id,
-                TripStop.sort_order >= requested,
-            )
-            .values(sort_order=TripStop.sort_order + 1)
-        )
-        new_stop = TripStop(trip_day_id=day.id, sort_order=requested, **body)
-    db.add(new_stop)
-    await _touch_trip(db, trip_id)
+    updated = await apply_insert_stop(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        day_id=day_id,
+        payload=payload.model_dump(),
+    )
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after add_stop")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.patch("/{trip_id}/stops/{stop_id}", response_model=TripOut)
@@ -333,17 +243,15 @@ async def update_stop(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    stop = await _load_stop(db, trip_id, stop_id, user.id)
-    if stop is None:
-        raise HTTPException(status_code=404, detail="Stop not found")
-    for key, value in payload.model_dump(exclude_unset=True).items():
-        setattr(stop, key, value)
-    await _touch_trip(db, trip_id)
+    updated = await apply_update_stop(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        stop_id=stop_id,
+        payload=payload.model_dump(exclude_unset=True),
+    )
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after update_stop")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.delete("/{trip_id}/stops/{stop_id}", response_model=TripOut)
@@ -353,18 +261,11 @@ async def delete_stop(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    stop = await _load_stop(db, trip_id, stop_id, user.id)
-    if stop is None:
-        raise HTTPException(status_code=404, detail="Stop not found")
-    # Per design: do NOT compact remaining sort_orders on delete. Gaps are
-    # fine; the relationship's `order_by="TripStop.sort_order"` handles it.
-    await db.delete(stop)
-    await _touch_trip(db, trip_id)
+    updated = await apply_delete_stop(
+        db, trip_id=trip_id, user_id=user.id, stop_id=stop_id
+    )
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after delete_stop")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.patch(
@@ -377,33 +278,15 @@ async def reorder_stops(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    day = await _load_day(db, trip_id, day_id, user.id)
-    if day is None:
-        raise HTTPException(status_code=404, detail="Day not found")
-    current_ids = {s.id for s in day.stops}
-    body_ids = {item.stop_id for item in payload.order}
-    if current_ids != body_ids:
-        raise HTTPException(status_code=409, detail="stop set out of sync")
-    body_orders = sorted(item.sort_order for item in payload.order)
-    if body_orders != list(range(len(body_orders))):
-        raise HTTPException(
-            status_code=400,
-            detail="sort_order values must be 0..N-1 contiguous",
-        )
-    new_order = {item.stop_id: item.sort_order for item in payload.order}
-    # Single CASE-WHEN UPDATE — UNIQUE(trip_day_id, sort_order) is checked
-    # at end-of-statement, so the position swap has no intermediate violation.
-    await db.execute(
-        update(TripStop)
-        .where(TripStop.trip_day_id == day.id)
-        .values(sort_order=case(new_order, value=TripStop.id))
+    updated = await apply_reorder_stops(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        day_id=day_id,
+        payload=payload.model_dump(mode="json"),
     )
-    await _touch_trip(db, trip_id)
     await db.commit()
-    refreshed = await _load_trip(db, trip_id, user.id)
-    if refreshed is None:
-        raise HTTPException(status_code=500, detail="Trip vanished after reorder")
-    return _serialize(refreshed)
+    return _serialize(updated)
 
 
 @router.put("/{trip_id}", response_model=TripOut)
