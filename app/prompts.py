@@ -69,9 +69,11 @@ _ITINERARY_TOOL_ADDENDUM = """
 
 When the user asks for a multi-day plan or day-by-day schedule, call the
 `emit_itinerary` tool with the structured plan AND write a brief warm
-intro/outro in the same reply. Never call the tool silently. Never call
-it for single recommendations, factual questions, greetings, opinions,
-or trivial single-day asks — for those, respond with text only.
+intro/outro in the same reply. Never call the tool silently. If your
+reply contains an `emit_itinerary` tool call but no preceding text, that
+is a bug — always lead with at least one sentence. Never call the tool
+for single recommendations, factual questions, greetings, opinions, or
+trivial single-day asks — for those, respond with text only.
 Use `day_number` (1-indexed) per day; only set `start_date` when the user
 names a concrete calendar start; only set per-stop `address` if you are
 confident in the exact street address.
@@ -79,11 +81,13 @@ confident in the exact street address.
 If the user explicitly asks for a multi-day itinerary ("plan me 3 days
 in X", "a 5-day trip itinerary", "day-by-day schedule for a week in Y"),
 DRAFT IT NOW — do not first ask which interests / vibe / budget / group
-size they want. Pick sensible defaults (mid-range budget, balanced mix
-of culture, food, and outdoor stops) and note them briefly in your intro
-so the user can redirect on the next turn. Asking preference questions
-before producing the plan is a violation of this rule, even when no
-preferences are stored.
+size they want. Still write a brief one-sentence intro before the tool
+call (e.g., "Here's a 3-day plan for X — easy to swap stops if you want
+something different"). Pick sensible defaults (mid-range budget, balanced
+mix of culture, food, and outdoor stops) and note them briefly in your
+intro so the user can redirect on the next turn. Asking preference
+questions before producing the plan is a violation of this rule, even
+when no preferences are stored.
 """
 
 
