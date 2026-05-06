@@ -1,9 +1,12 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+logger = logging.getLogger(__name__)
 
 from app.db.engine import get_session
 from app.db.models import Trip, TripDay, TripStop, User, utcnow
@@ -109,7 +112,22 @@ async def create_trip(
             )
         trip.days.append(trip_day)
     db.add(trip)
-    await db.commit()
+    # Wrap commit so a constraint violation or driver error surfaces a
+    # diagnosable response instead of a generic 500. The full traceback
+    # still lands in the server logs; the response detail is short.
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(
+            "create_trip commit failed user_id=%s days=%d",
+            user.id,
+            len(payload.days),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"create_trip failed: {type(exc).__name__}: {exc}",
+        )
 
     refreshed = await _load_trip(db, trip.id, user.id)
     if refreshed is None:
