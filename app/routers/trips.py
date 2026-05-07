@@ -283,7 +283,10 @@ async def reorder_stops(
         trip_id=trip_id,
         user_id=user.id,
         day_id=day_id,
-        payload=payload.model_dump(mode="json"),
+        # exclude_unset so callers that omit the optional time fields don't
+        # accidentally null them on the server (per-item arrival_time etc.
+        # are only written when the caller explicitly included them).
+        payload=payload.model_dump(mode="json", exclude_unset=True),
     )
     await db.commit()
     return _serialize(updated)

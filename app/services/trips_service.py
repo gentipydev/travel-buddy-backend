@@ -364,29 +364,41 @@ async def apply_reorder_stops(
     payload: dict,
 ) -> Trip:
     """Reorder stops within a day. `payload` matches
-    `StopReorderBody.model_dump()` with `order: list[{stop_id, sort_order}]`.
+    `StopReorderBody.model_dump(exclude_unset=True)` with
+    `order: list[{stop_id, sort_order, arrival_time?, end_time?, duration_minutes?}]`.
     Caller must send the COMPLETE new ordering so the server can validate the
-    set matches what's on disk."""
+    set matches what's on disk. Optional per-item time fields are only written
+    when the caller explicitly included them (legacy {stop_id, sort_order}-only
+    callers leave times untouched)."""
     day = await _load_day(db, trip_id, day_id, user_id)
     if day is None:
         raise HTTPException(status_code=404, detail="Day not found")
     order_items = payload.get("order") or []
     # Coerce stop_id strings → UUID for set comparison parity with ORM ids.
-    parsed_order = [
-        (UUID(str(item["stop_id"])), int(item["sort_order"]))
-        for item in order_items
-    ]
+    # Each tuple carries the per-item time-field dict (only keys actually
+    # present in the payload; absent keys mean "leave column untouched", a
+    # null value means "clear the column").
+    parsed_order: list[tuple[UUID, int, dict]] = []
+    for item in order_items:
+        sid = UUID(str(item["stop_id"]))
+        so = int(item["sort_order"])
+        time_fields = {
+            k: item[k]
+            for k in ("arrival_time", "end_time", "duration_minutes")
+            if k in item
+        }
+        parsed_order.append((sid, so, time_fields))
     current_ids = {s.id for s in day.stops}
-    body_ids = {sid for sid, _ in parsed_order}
+    body_ids = {sid for sid, _, _ in parsed_order}
     if current_ids != body_ids:
         raise HTTPException(status_code=409, detail="stop set out of sync")
-    body_orders = sorted(so for _, so in parsed_order)
+    body_orders = sorted(so for _, so, _ in parsed_order)
     if body_orders != list(range(len(body_orders))):
         raise HTTPException(
             status_code=400,
             detail="sort_order values must be 0..N-1 contiguous",
         )
-    new_order = {sid: so for sid, so in parsed_order}
+    new_order = {sid: so for sid, so, _ in parsed_order}
     # Two-phase update to dodge mid-statement UNIQUE(trip_day_id, sort_order)
     # violations on a permutation. Despite the docs implying constraints are
     # checked at end-of-statement, PostgreSQL evaluates non-deferrable UNIQUE
@@ -408,6 +420,12 @@ async def apply_reorder_stops(
         .where(TripStop.trip_day_id == day.id)
         .values(sort_order=case(new_order, value=TripStop.id))
     )
+    for sid, _, time_fields in parsed_order:
+        if not time_fields:
+            continue
+        await db.execute(
+            update(TripStop).where(TripStop.id == sid).values(**time_fields)
+        )
     await _touch_trip(db, trip_id)
     await db.flush()
     refreshed = await _load_trip(db, trip_id, user_id)

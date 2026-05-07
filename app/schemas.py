@@ -157,6 +157,18 @@ class TripDayCreateBody(BaseModel):
 class StopReorderItem(BaseModel):
     stop_id: UUID
     sort_order: int = Field(ge=0)
+    # Optional time slot fields. The reorder caller can include these per
+    # item to anchor the chronological time slots to position (so swapping
+    # two stops keeps `arrival_time` ascending). Only fields explicitly set
+    # by the caller are forwarded — see the `exclude_unset=True` dump in the
+    # router so a legacy {stop_id, sort_order} payload leaves times untouched.
+    arrival_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
+    )
+    end_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$"
+    )
+    duration_minutes: int | None = Field(default=None, ge=0)
 
 
 class StopReorderBody(BaseModel):

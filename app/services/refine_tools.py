@@ -328,7 +328,7 @@ async def apply_refine_tool(
             trip_id=trip_id,
             user_id=user_id,
             day_id=day_id,
-            payload=body.model_dump(mode="json"),
+            payload=body.model_dump(mode="json", exclude_unset=True),
         )
     if name == "add_day":
         body = TripDayCreateBody.model_validate(raw_input)
