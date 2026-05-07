@@ -7,6 +7,7 @@ with Cohere's reranker. Both fail soft — the chat path keeps working with
 empty / fallback retrieval so a Cohere outage doesn't take down chat.
 """
 import logging
+import time
 
 import cohere
 from sqlalchemy import select
@@ -83,6 +84,7 @@ async def search_chunks(
     embed_input = _build_embed_input(query, conversation_history)
 
     co = _get_cohere()
+    started = time.perf_counter()
     try:
         response = await co.embed(
             model=settings.embedding_model,
@@ -94,6 +96,7 @@ async def search_chunks(
         logger.exception("Cohere embed failed")
         return []
     query_vector = response.embeddings.float_[0]
+    embed_ms = round((time.perf_counter() - started) * 1000.0, 2)
 
     result = await db.execute(
         select(Chunk)
@@ -101,7 +104,18 @@ async def search_chunks(
         .order_by(Chunk.embedding.cosine_distance(query_vector))
         .limit(top_k)
     )
-    return list(result.scalars().all())
+    chunks = list(result.scalars().all())
+    logger.info(
+        "cohere.embed",
+        extra={
+            "model": settings.embedding_model,
+            "input_chars": len(embed_input),
+            "duration_ms": embed_ms,
+            "top_k": top_k,
+            "chunks_returned": len(chunks),
+        },
+    )
+    return chunks
 
 
 async def rerank_chunks(
@@ -122,6 +136,7 @@ async def rerank_chunks(
         return [], None
 
     co = _get_cohere()
+    started = time.perf_counter()
     try:
         response = await co.rerank(
             model=settings.rerank_model,
@@ -133,6 +148,7 @@ async def rerank_chunks(
         logger.exception("Cohere rerank failed; falling back to embed-only order")
         return chunks[:top_n], None
 
+    rerank_ms = round((time.perf_counter() - started) * 1000.0, 2)
     ranked = [chunks[r.index] for r in response.results]
     # getattr guards against future Cohere SDK shape changes — telemetry must
     # never break the chat path.
@@ -140,5 +156,15 @@ async def rerank_chunks(
         getattr(response.results[0], "relevance_score", None)
         if response.results
         else None
+    )
+    logger.info(
+        "cohere.rerank",
+        extra={
+            "model": settings.rerank_model,
+            "candidates": len(chunks),
+            "top_n": top_n,
+            "duration_ms": rerank_ms,
+            "top_score": top_score,
+        },
     )
     return ranked, top_score

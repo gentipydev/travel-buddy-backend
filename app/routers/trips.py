@@ -89,6 +89,15 @@ async def create_trip(
             trip.days.append(trip_day)
         db.add(trip)
         await db.commit()
+        logger.info(
+            "trip.created",
+            extra={
+                "trip_id": str(trip.id),
+                "local_user_id": user.id,
+                "days": len(payload.days),
+                "stops": sum(len(d.stops) for d in payload.days),
+            },
+        )
 
         refreshed = await _load_trip(db, trip.id, user.id)
         if refreshed is None:
@@ -157,6 +166,10 @@ async def delete_trip(
         raise HTTPException(status_code=404, detail="Trip not found")
     await db.delete(trip)
     await db.commit()
+    logger.info(
+        "trip.deleted",
+        extra={"trip_id": str(trip_id), "local_user_id": user.id},
+    )
     return {"status": "deleted"}
 
 
@@ -167,13 +180,22 @@ async def update_trip(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
+    patch = payload.model_dump(exclude_unset=True)
     updated = await apply_update_trip(
         db,
         trip_id=trip_id,
         user_id=user.id,
-        payload=payload.model_dump(exclude_unset=True),
+        payload=patch,
     )
     await db.commit()
+    logger.info(
+        "trip.updated",
+        extra={
+            "trip_id": str(trip_id),
+            "local_user_id": user.id,
+            "fields": sorted(patch.keys()),
+        },
+    )
     return _serialize(updated)
 
 

@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,13 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_supabase, settings
 from app.db.engine import init_db
+from app.logging_config import request_logging_middleware, setup_logging
 from app.routers import chat, conversations, health, images, preferences, trips, users
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
-)
+# Configure logging BEFORE FastAPI is built so uvicorn's own loggers attach
+# to the same handler/format. JSON in prod (Render filters per-field on JSON);
+# `LOG_FORMAT=text` in `.env` switches to a human-readable format locally.
+setup_logging(level=settings.log_level, fmt=settings.log_format)
 
 
 @asynccontextmanager
@@ -24,12 +24,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Travel Buddy API", lifespan=lifespan)
 
+# Order matters: middleware registered later wraps the handler innermost,
+# so register CORS first (innermost — closest to the route), then the
+# request logger (outermost — runs first on the way in, last on the way
+# out). That way the access log captures the response status post-CORS.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+app.middleware("http")(request_logging_middleware)
 
 app.include_router(health.router)
 app.include_router(users.router)

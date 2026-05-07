@@ -1,3 +1,6 @@
+import logging
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +11,7 @@ from app.db.models import User, UserPreferences
 from app.deps import require_local_user
 from app.schemas import UpdatePreferencesRequest
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
@@ -31,6 +35,7 @@ async def update_preferences(
     )
     prefs = result.scalar_one_or_none()
 
+    created = prefs is None
     if prefs:
         for field in [
             "budget",
@@ -50,6 +55,10 @@ async def update_preferences(
         db.add(prefs)
 
     await db.commit()
+    logger.info(
+        "preferences.saved",
+        extra={"local_user_id": user.id, "created": created},
+    )
     return {"status": "updated"}
 
 
@@ -99,15 +108,27 @@ async def generate_persona(
     prefs_text = prefs.to_prompt()
     prefs.travel_persona = saved_persona
 
+    started = time.perf_counter()
     response = await client.messages.create(
         model=settings.model_chat,
         max_tokens=512,
         system=PERSONA_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prefs_text}],
     )
+    elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
     new_persona = "".join(
         b.text for b in response.content if b.type == "text"
     ).strip()
+    logger.info(
+        "anthropic.persona_generated",
+        extra={
+            "model": settings.model_chat,
+            "input_tokens": getattr(response.usage, "input_tokens", None),
+            "output_tokens": getattr(response.usage, "output_tokens", None),
+            "duration_ms": elapsed_ms,
+            "persona_chars": len(new_persona),
+        },
+    )
 
     await db.execute(
         update(UserPreferences)

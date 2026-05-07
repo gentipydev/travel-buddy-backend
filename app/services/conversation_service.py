@@ -142,6 +142,10 @@ async def get_or_create_conversation(
     )
     db.add(conv)
     await db.flush()
+    logger.info(
+        "conversation.created",
+        extra={"conversation_id": str(conv.id), "local_user_id": user_id},
+    )
     return conv
 
 

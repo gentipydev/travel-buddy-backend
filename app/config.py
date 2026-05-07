@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
+    # Logging — drives `setup_logging()` in `app/main.py`. `log_format='json'`
+    # is the production default (Render Logs UI filters per-field on JSON);
+    # set `LOG_FORMAT=text` locally for human-friendly output.
+    log_level: str = "INFO"
+    log_format: str = "json"
+
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",")]

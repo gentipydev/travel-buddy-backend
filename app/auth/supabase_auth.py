@@ -1,9 +1,14 @@
+import logging
 from functools import lru_cache
+
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, decode as jwt_decode
 
 from app.config import settings
+from app.logging_config import user_id_var
+
+logger = logging.getLogger(__name__)
 
 ISSUER = f"{settings.supabase_url}/auth/v1"
 JWKS_URL = f"{ISSUER}/.well-known/jwks.json"
@@ -29,6 +34,9 @@ def _verify(token: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
+        # Don't log the token; one warning per rejection is enough to
+        # distinguish "real auth failure" from "no token sent".
+        logger.warning("auth.token_rejected: %s", e)
         raise HTTPException(status_code=401, detail=str(e))
 
 
@@ -39,6 +47,7 @@ async def get_current_user(
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     payload = _verify(credentials.credentials)
+    user_id_var.set(payload["sub"])
     return {
         "id": payload["sub"],
         "email": payload.get("email"),
@@ -54,6 +63,7 @@ async def get_optional_user(
         return None
     try:
         payload = _verify(credentials.credentials)
+        user_id_var.set(payload["sub"])
         return {
             "id": payload["sub"],
             "email": payload.get("email"),
