@@ -15,11 +15,14 @@ import pytest
 
 from app.db.models import Place, PlaceCache
 from app.services import google_places
-from app.services.google_places import enrich_stop
+from app.services.google_places import enrich_stop, find_place_id_by_name
 
 
 GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 GOOGLE_PHOTO_URL = "https://maps.googleapis.com/maps/api/place/photo"
+GOOGLE_TEXTSEARCH_URL = (
+    "https://maps.googleapis.com/maps/api/place/textsearch/json"
+)
 
 
 def _stub_settings(monkeypatch, *, key="dummy-key", places_enabled=True):
@@ -215,3 +218,98 @@ async def test_photo_resolution_failure_keeps_other_fields(
     assert result.formatted_address == "Test St, Tirana"
     # Cache row was still written.
     assert len(fake_db.executed) == 3
+
+
+def _textsearch_response(
+    place_id: str = "ChIJsk_text",
+    lat: float = 41.3275,
+    lng: float = 19.8187,
+) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "status": "OK",
+            "results": [
+                {
+                    "place_id": place_id,
+                    "name": "Skanderbeg Square",
+                    "formatted_address": "Skanderbeg Square, Tirana, Albania",
+                    "geometry": {"location": {"lat": lat, "lng": lng}},
+                }
+            ],
+        },
+    )
+
+
+async def test_textsearch_happy_path(mock_http, monkeypatch):
+    _stub_settings(monkeypatch)
+    mock_http.on(GOOGLE_TEXTSEARCH_URL, lambda req: _textsearch_response())
+
+    result = await find_place_id_by_name(
+        name="Skanderbeg Square", city="Tirana"
+    )
+
+    assert result == ("ChIJsk_text", 41.3275, 19.8187)
+    # Query string should combine name + city for relevance.
+    assert "Skanderbeg%20Square%2C%20Tirana" in str(mock_http.requests[0].url)
+
+
+async def test_textsearch_zero_results_returns_none(mock_http, monkeypatch):
+    _stub_settings(monkeypatch)
+    mock_http.on(
+        GOOGLE_TEXTSEARCH_URL,
+        lambda req: httpx.Response(
+            200, json={"status": "ZERO_RESULTS", "results": []}
+        ),
+    )
+
+    result = await find_place_id_by_name(name="Nonexistent Place")
+
+    assert result is None
+
+
+async def test_textsearch_kill_switch_skips_http(mock_http, monkeypatch):
+    _stub_settings(monkeypatch, places_enabled=False)
+
+    result = await find_place_id_by_name(
+        name="Skanderbeg Square", city="Tirana"
+    )
+
+    assert result is None
+    assert mock_http.requests == []
+
+
+async def test_textsearch_empty_api_key_skips_http(mock_http, monkeypatch):
+    _stub_settings(monkeypatch, key="")
+
+    result = await find_place_id_by_name(name="Skanderbeg Square")
+
+    assert result is None
+    assert mock_http.requests == []
+
+
+async def test_textsearch_http_error_returns_none(mock_http, monkeypatch):
+    _stub_settings(monkeypatch)
+    mock_http.on(GOOGLE_TEXTSEARCH_URL, lambda req: httpx.Response(500))
+
+    result = await find_place_id_by_name(name="Skanderbeg Square")
+
+    assert result is None
+
+
+async def test_textsearch_drops_result_without_geometry(mock_http, monkeypatch):
+    _stub_settings(monkeypatch)
+    mock_http.on(
+        GOOGLE_TEXTSEARCH_URL,
+        lambda req: httpx.Response(
+            200,
+            json={
+                "status": "OK",
+                "results": [{"place_id": "ChIJnogeo", "name": "x"}],
+            },
+        ),
+    )
+
+    result = await find_place_id_by_name(name="X")
+
+    assert result is None

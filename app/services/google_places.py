@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 _PHOTO_URL = "https://maps.googleapis.com/maps/api/place/photo"
+_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 _DETAILS_FIELDS = (
     "place_id,name,formatted_address,geometry,rating,user_ratings_total,photos,types"
 )
@@ -324,6 +325,95 @@ def _log_done(google_place_id: str, source: str, started: float) -> None:
     logger.info(
         "google_api=places_enrich place_id=%s source=%s latency_ms=%s",
         google_place_id,
+        source,
+        elapsed_ms,
+    )
+
+
+async def find_place_id_by_name(
+    *,
+    name: str,
+    city: str | None = None,
+) -> tuple[str, float, float] | None:
+    """Resolve a free-text place query to (place_id, lat, lng).
+
+    Used by trip enrichment when Claude produces a stop name without a
+    `google_place_id`. The caller persists the place_id on the stop so
+    subsequent runs hit the curated/cache path and avoid another text
+    search. Returns None when the kill switch is off, the request fails,
+    or there are no results.
+    """
+    if not settings.google_api_key or not settings.google_places_enabled:
+        return None
+
+    query = f"{name}, {city}" if city else name
+    started = time.perf_counter()
+    try:
+        async with _http_client() as client:
+            resp = await client.get(
+                _TEXT_SEARCH_URL,
+                params={"query": query, "key": settings.google_api_key},
+            )
+            if resp.status_code == 429:
+                logger.warning(
+                    "google_api=places_textsearch query=%r status=quota_exceeded",
+                    query,
+                )
+                return None
+            if resp.status_code != 200:
+                logger.warning(
+                    "google_api=places_textsearch query=%r status=%s",
+                    query,
+                    resp.status_code,
+                )
+                return None
+            data = resp.json()
+            api_status = data.get("status")
+            if api_status == "ZERO_RESULTS":
+                _log_textsearch_done(query, "no_results", started)
+                return None
+            if api_status not in ("OK", None):
+                logger.warning(
+                    "google_api=places_textsearch query=%r api_status=%s",
+                    query,
+                    api_status,
+                )
+                return None
+            results = data.get("results") or []
+    except (httpx.RequestError, httpx.TimeoutException) as exc:
+        logger.warning(
+            "google_api=places_textsearch query=%r error=%s",
+            query,
+            type(exc).__name__,
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "google_api=places_textsearch query=%r unexpected", query
+        )
+        return None
+
+    if not results:
+        _log_textsearch_done(query, "no_results", started)
+        return None
+    top = results[0]
+    place_id = top.get("place_id")
+    geom = (top.get("geometry") or {}).get("location") or {}
+    lat = geom.get("lat")
+    lng = geom.get("lng")
+    if not place_id or lat is None or lng is None:
+        _log_textsearch_done(query, "no_results", started)
+        return None
+
+    _log_textsearch_done(query, "fresh", started)
+    return place_id, float(lat), float(lng)
+
+
+def _log_textsearch_done(query: str, source: str, started: float) -> None:
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "google_api=places_textsearch query=%r source=%s latency_ms=%s",
+        query,
         source,
         elapsed_ms,
     )

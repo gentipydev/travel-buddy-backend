@@ -34,7 +34,11 @@ from app.config import settings
 from app.db.models import Trip, TripDay, TripRoute, TripStop
 from app.services.geo import haversine_km
 from app.services.google_directions import get_route
-from app.services.google_places import EnrichmentResult, enrich_stop
+from app.services.google_places import (
+    EnrichmentResult,
+    enrich_stop,
+    find_place_id_by_name,
+)
 from app.services.static_map import build_static_map_url
 
 
@@ -140,9 +144,25 @@ async def _enrich_places(
     db: AsyncSession, stops: Sequence[TripStop]
 ) -> Counter[str]:
     """Resolve stops in parallel; mutate each stop in-place. Returns a
-    counter with `curated`/`cache`/`fresh`/`missing` for the log line."""
-    targets = [s for s in stops if s.google_place_id]
+    counter with `curated`/`cache`/`fresh`/`missing` for the log line.
+
+    Two-phase. Stops without a `google_place_id` first go through Google
+    Places Text Search to resolve one from name+city — Claude tends to
+    produce names but no IDs, and without an ID there's nothing to enrich
+    or geocode. Resolved stops then merge back with stops that already
+    had an ID and run the full curated/cache/fresh path.
+    """
     counter: Counter[str] = Counter()
+
+    # Phase A — text-search fallback for stops missing google_place_id.
+    needs_resolution = [
+        s for s in stops if not s.google_place_id and (s.name or "").strip()
+    ]
+    if needs_resolution:
+        await _resolve_missing_place_ids(needs_resolution)
+
+    # Phase B — enrich stops that have an ID (original or just resolved).
+    targets = [s for s in stops if s.google_place_id]
     counter["missing"] = len(stops) - len(targets)
     if not targets:
         return counter
@@ -166,6 +186,40 @@ async def _enrich_places(
         _apply_to_stop(stop, result)
         counter[result.source] += 1
     return counter
+
+
+async def _resolve_missing_place_ids(stops: Sequence[TripStop]) -> None:
+    """Run Google Places Text Search in parallel for each stop and write
+    `google_place_id` (and backfill lat/lng when missing) when a result
+    comes back. Stops where the search returns nothing are left alone —
+    the caller counts them as missing in the next phase."""
+    queries = [(s, (s.name or "").strip(), s.city) for s in stops]
+    results = await asyncio.gather(
+        *[find_place_id_by_name(name=name, city=city) for _, name, city in queries],
+        return_exceptions=True,
+    )
+    resolved = 0
+    for (stop, _name, _city), result in zip(queries, results):
+        if isinstance(result, Exception):
+            logger.warning(
+                "find_place_id name=%r city=%r raised=%s",
+                stop.name,
+                stop.city,
+                type(result).__name__,
+            )
+            continue
+        if result is None:
+            continue
+        place_id, lat, lng = result
+        stop.google_place_id = place_id
+        if stop.lat is None:
+            stop.lat = lat
+        if stop.lng is None:
+            stop.lng = lng
+        resolved += 1
+    logger.info(
+        "trip_enrichment textsearch_resolved=%d/%d", resolved, len(stops)
+    )
 
 
 def _apply_to_stop(stop: TripStop, result: EnrichmentResult) -> None:
