@@ -10,7 +10,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 
 _BASE_URL = "https://maps.googleapis.com/maps/api/staticmap"
@@ -169,6 +172,12 @@ def build_static_map_url(
 
     if signing_secret:
         url = _sign_url(url, signing_secret)
+        logger.info(
+            "static_map signed url_len=%d secret_len=%d secret_head=%r",
+            len(url), len(signing_secret), signing_secret[:4],
+        )
+    else:
+        logger.info("static_map UNSIGNED url_len=%d (no signing_secret)", len(url))
     return url
 
 
