@@ -32,6 +32,7 @@ from app.services.trips_service import (
     apply_update_trip,
     get_or_create_refine_conversation,
     replace_trip_from_payload,
+    serialize_trip,
 )
 
 # TODO(tests): pytest scaffolding deferred to a follow-up PR — see
@@ -105,7 +106,7 @@ async def create_trip(
             raise HTTPException(
                 status_code=500, detail="Trip not found after create"
             )
-        return _serialize(refreshed)
+        return await serialize_trip(db, refreshed)
     except HTTPException:
         # Already a structured FastAPI error — let it through unchanged.
         raise
@@ -133,7 +134,10 @@ async def list_trips(
     result = await db.execute(
         select(Trip)
         .where(Trip.user_id == user.id)
-        .options(selectinload(Trip.days).selectinload(TripDay.stops))
+        .options(
+            selectinload(Trip.days).selectinload(TripDay.stops),
+            selectinload(Trip.routes),
+        )
         .order_by(Trip.updated_at.desc())
     )
     trips = result.unique().scalars().all()
@@ -196,7 +200,7 @@ async def update_trip(
             "fields": sorted(patch.keys()),
         },
     )
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.post(
@@ -217,7 +221,7 @@ async def add_day(
         payload=payload.model_dump(),
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.delete("/{trip_id}/days/{day_id}", response_model=TripOut)
@@ -231,7 +235,7 @@ async def delete_day(
         db, trip_id=trip_id, user_id=user.id, day_id=day_id
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.post(
@@ -254,7 +258,7 @@ async def add_stop(
         payload=payload.model_dump(),
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.patch("/{trip_id}/stops/{stop_id}", response_model=TripOut)
@@ -273,7 +277,7 @@ async def update_stop(
         payload=payload.model_dump(exclude_unset=True),
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.delete("/{trip_id}/stops/{stop_id}", response_model=TripOut)
@@ -287,7 +291,7 @@ async def delete_stop(
         db, trip_id=trip_id, user_id=user.id, stop_id=stop_id
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.patch(
@@ -311,7 +315,7 @@ async def reorder_stops(
         payload=payload.model_dump(mode="json", exclude_unset=True),
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.put("/{trip_id}", response_model=TripOut)
@@ -333,7 +337,7 @@ async def replace_trip(
         payload=payload.model_dump(mode="json"),
     )
     await db.commit()
-    return _serialize(updated)
+    return await serialize_trip(db, updated)
 
 
 @router.post("/{trip_id}/conversation")

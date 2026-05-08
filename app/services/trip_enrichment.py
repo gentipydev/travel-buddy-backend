@@ -1,0 +1,258 @@
+"""Best-effort enrichment of a saved trip.
+
+Runs after every save / refine (via `serialize_trip` in trips_service.py).
+Never raises: a failure in any phase is logged and the trip ends up with
+whatever data we managed to gather. Saves never block on this module.
+
+Phases:
+    1. Load trip + days + stops + existing routes; truncate routes (refines
+       produce a clean route set).
+    2. Places enrichment in parallel — curated/cache/Google. Updates each
+       stop's photo_url/rating/formatted_address; backfills lat/lng when
+       Claude's output was sparse but the curated row has them.
+    3. Directions in parallel for consecutive stops with coords. Inserts
+       trip_routes rows; failed segments are skipped (the client draws a
+       straight line as fallback).
+    4. Build signed Static Maps URL covering all geo'd stops + the new
+       polylines; persist on Trip.static_map_url.
+    5. Commit.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections import Counter
+from typing import Sequence
+from uuid import UUID
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.config import settings
+from app.db.models import Trip, TripDay, TripRoute, TripStop
+from app.services.geo import haversine_km
+from app.services.google_directions import get_route
+from app.services.google_places import EnrichmentResult, enrich_stop
+from app.services.static_map import build_static_map_url
+
+
+logger = logging.getLogger(__name__)
+
+
+_WALKING_THRESHOLD_KM = 2.0
+
+
+async def enrich_trip(db: AsyncSession, trip_id: UUID) -> None:
+    """Best-effort enrichment of a saved trip. Never raises."""
+    started = time.perf_counter()
+    place_sources: Counter[str] = Counter()
+    routes_created = 0
+    routes_attempted = 0
+    static_map_status = "skipped"
+
+    # Phase 1 — load.
+    trip = await _load(db, trip_id)
+    if trip is None:
+        logger.warning("enrich_trip trip_id=%s missing", trip_id)
+        return
+
+    # Wipe the previous route set so refines (reorders, swaps, deletes) end
+    # up with exactly the routes that match current geometry.
+    await db.execute(delete(TripRoute).where(TripRoute.trip_id == trip_id))
+
+    flat_stops: list[TripStop] = [
+        stop for day in trip.days for stop in day.stops
+    ]
+
+    # Phase 2 — places (parallel).
+    try:
+        place_sources = await _enrich_places(db, flat_stops)
+    except Exception:
+        logger.exception("enrich_trip phase=places trip_id=%s", trip_id)
+
+    # Phase 3 — directions (parallel; depends on phase-2 lat/lng backfill).
+    try:
+        routes_attempted, routes_created = await _create_routes(
+            db, trip_id, trip.days
+        )
+    except Exception:
+        logger.exception("enrich_trip phase=directions trip_id=%s", trip_id)
+
+    # Phase 4 — static map URL. Re-read trip_routes so the builder sees
+    # exactly what we just inserted (including any failures that left gaps).
+    url: str | None = None
+    try:
+        new_routes = (
+            await db.execute(
+                select(TripRoute).where(TripRoute.trip_id == trip_id)
+            )
+        ).scalars().all()
+        url = _build_static_map(trip.days, new_routes)
+        static_map_status = "ok" if url else "empty"
+    except Exception:
+        logger.exception("enrich_trip phase=static_map trip_id=%s", trip_id)
+        static_map_status = "error"
+
+    if url is not None:
+        trip.static_map_url = url
+
+    # Phase 5 — commit.
+    try:
+        await db.commit()
+    except Exception:
+        logger.exception("enrich_trip phase=commit trip_id=%s", trip_id)
+        await db.rollback()
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "enrich_trip trip_id=%s places=%s/%s "
+        "(curated=%s cache=%s fresh=%s missing=%s) "
+        "routes=%s/%s static_map=%s elapsed_ms=%s",
+        trip_id,
+        sum(v for k, v in place_sources.items() if k != "missing"),
+        sum(place_sources.values()),
+        place_sources.get("curated", 0),
+        place_sources.get("cache", 0),
+        place_sources.get("fresh", 0),
+        place_sources.get("missing", 0),
+        routes_created,
+        routes_attempted,
+        static_map_status,
+        elapsed_ms,
+    )
+
+
+async def _load(db: AsyncSession, trip_id: UUID) -> Trip | None:
+    result = await db.execute(
+        select(Trip)
+        .where(Trip.id == trip_id)
+        .options(
+            selectinload(Trip.days).selectinload(TripDay.stops),
+            selectinload(Trip.routes),
+        )
+    )
+    return result.unique().scalar_one_or_none()
+
+
+async def _enrich_places(
+    db: AsyncSession, stops: Sequence[TripStop]
+) -> Counter[str]:
+    """Resolve stops in parallel; mutate each stop in-place. Returns a
+    counter with `curated`/`cache`/`fresh`/`missing` for the log line."""
+    targets = [s for s in stops if s.google_place_id]
+    counter: Counter[str] = Counter()
+    counter["missing"] = len(stops) - len(targets)
+    if not targets:
+        return counter
+
+    results = await asyncio.gather(
+        *[enrich_stop(db, s.google_place_id) for s in targets],
+        return_exceptions=True,
+    )
+    for stop, result in zip(targets, results):
+        if isinstance(result, Exception):
+            logger.warning(
+                "enrich_stop place_id=%s raised=%s",
+                stop.google_place_id,
+                type(result).__name__,
+            )
+            counter["missing"] += 1
+            continue
+        if result is None:
+            counter["missing"] += 1
+            continue
+        _apply_to_stop(stop, result)
+        counter[result.source] += 1
+    return counter
+
+
+def _apply_to_stop(stop: TripStop, result: EnrichmentResult) -> None:
+    if result.photo_url is not None:
+        stop.photo_url = result.photo_url
+    if result.rating is not None:
+        stop.rating = result.rating
+    if result.formatted_address is not None:
+        stop.formatted_address = result.formatted_address
+    # Backfill coords only when missing — Claude's value wins if both have one.
+    if stop.lat is None and result.lat is not None:
+        stop.lat = result.lat
+    if stop.lng is None and result.lng is not None:
+        stop.lng = result.lng
+
+
+async def _create_routes(
+    db: AsyncSession,
+    trip_id: UUID,
+    days: Sequence[TripDay],
+) -> tuple[int, int]:
+    """Schedule one Directions call per consecutive (lat,lng)-bearing stop
+    pair within the same day. Returns (attempted, created)."""
+    pairs: list[tuple[TripDay, TripStop, TripStop]] = []
+    for day in days:
+        ordered = sorted(day.stops, key=lambda s: s.sort_order)
+        for prev, nxt in zip(ordered, ordered[1:]):
+            if (
+                prev.lat is not None and prev.lng is not None
+                and nxt.lat is not None and nxt.lng is not None
+            ):
+                pairs.append((day, prev, nxt))
+    if not pairs:
+        return 0, 0
+
+    tasks = []
+    for _, prev, nxt in pairs:
+        mode = (
+            "walking"
+            if haversine_km(prev.lat, prev.lng, nxt.lat, nxt.lng)
+            < _WALKING_THRESHOLD_KM
+            else "driving"
+        )
+        tasks.append(
+            get_route(db, prev.lat, prev.lng, nxt.lat, nxt.lng, mode)
+        )
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    created = 0
+    for (day, prev, nxt), result in zip(pairs, results):
+        if isinstance(result, Exception) or result is None:
+            continue
+        db.add(
+            TripRoute(
+                trip_id=trip_id,
+                trip_day_id=day.id,
+                from_stop_id=prev.id,
+                to_stop_id=nxt.id,
+                encoded_polyline=result.encoded_polyline,
+                distance_meters=result.distance_meters,
+                duration_seconds=result.duration_seconds,
+                travel_mode=result.travel_mode,
+            )
+        )
+        created += 1
+    if created:
+        await db.flush()
+    return len(pairs), created
+
+
+def _build_static_map(
+    days: Sequence[TripDay], routes: Sequence[TripRoute]
+) -> str | None:
+    markers_by_day: list[list[tuple[float, float]]] = []
+    for day in days:
+        ordered = sorted(day.stops, key=lambda s: s.sort_order)
+        markers_by_day.append(
+            [(s.lat, s.lng) for s in ordered if s.lat is not None and s.lng is not None]
+        )
+    # Drop trailing empty-marker days so we don't waste color slots on them.
+    if not any(markers_by_day):
+        return None
+    polylines = [r.encoded_polyline for r in routes]
+
+    return build_static_map_url(
+        api_key=settings.google_api_key,
+        signing_secret=settings.google_url_signing_secret,
+        markers_by_day=markers_by_day,
+        polylines=polylines,
+    )

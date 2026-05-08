@@ -11,7 +11,13 @@ editor endpoints and Claude's refine tools. Each loads + mutates + flushes,
 returning the canonical post-mutation Trip; the caller owns the transaction
 boundary so a refine turn can apply ops + persist the assistant message in
 one commit.
+
+`serialize_trip` is the public chokepoint every mutation path runs through —
+it enriches the trip server-side (Google Places + Directions, static map URL)
+before serializing. Reads stay on the sync `_serialize` so cached state is
+returned without re-hitting Google.
 """
+import logging
 from datetime import date
 from uuid import UUID
 
@@ -23,12 +29,16 @@ from sqlalchemy.orm import selectinload
 from app.db.models import Conversation, Trip, TripDay, TripStop, utcnow
 
 
+logger = logging.getLogger(__name__)
+
+
 def _serialize(trip: Trip) -> dict:
     return {
         "id": str(trip.id),
         "title": trip.title,
         "summary": trip.summary,
         "start_date": trip.start_date.isoformat() if trip.start_date else None,
+        "static_map_url": trip.static_map_url,
         "created_at": trip.created_at.isoformat() if trip.created_at else "",
         "updated_at": trip.updated_at.isoformat() if trip.updated_at else "",
         "days": [
@@ -53,13 +63,60 @@ def _serialize(trip: Trip) -> dict:
                         "lat": stop.lat,
                         "lng": stop.lng,
                         "google_place_id": stop.google_place_id,
+                        "photo_url": stop.photo_url,
+                        "rating": stop.rating,
+                        "formatted_address": stop.formatted_address,
                     }
                     for stop in day.stops
                 ],
             }
             for day in trip.days
         ],
+        "routes": [
+            {
+                "id": str(route.id),
+                "trip_day_id": str(route.trip_day_id),
+                "from_stop_id": str(route.from_stop_id),
+                "to_stop_id": str(route.to_stop_id),
+                "encoded_polyline": route.encoded_polyline,
+                "distance_meters": route.distance_meters,
+                "duration_seconds": route.duration_seconds,
+                "travel_mode": route.travel_mode,
+            }
+            for route in (trip.routes or [])
+        ],
     }
+
+
+async def _enrich_and_serialize(db: AsyncSession, trip: Trip) -> dict:
+    """Enrich the trip server-side, then serialize.
+
+    The single chokepoint every trip-mutation path runs through — `POST
+    /trips`, `PUT /trips/{id}`, every `apply_*` endpoint, and both
+    `event: trip_refined` SSE branches in chat. Best-effort: enrichment
+    failures are logged but the response still goes out (with whatever
+    pre-enrichment state we had on disk).
+    """
+    try:
+        # Local import dodges the trips_service ↔ trip_enrichment cycle.
+        from app.services.trip_enrichment import enrich_trip
+        await enrich_trip(db, trip.id)
+        # enrich_trip mutated stop fields and replaced trip_routes in the
+        # same session; reload so the serialized dict reflects fresh state.
+        refreshed = await _load_trip(db, trip.id, trip.user_id)
+        if refreshed is not None:
+            trip = refreshed
+    except Exception:
+        logger.exception(
+            "enrich_and_serialize trip_id=%s — falling back to raw serialize",
+            trip.id,
+        )
+    return _serialize(trip)
+
+
+# Public alias. routers/trips.py and routers/chat.py import this; the
+# leading-underscore name stays callable too for any internal use.
+serialize_trip = _enrich_and_serialize
 
 
 async def _load_trip(
@@ -68,7 +125,10 @@ async def _load_trip(
     result = await db.execute(
         select(Trip)
         .where(Trip.id == trip_id, Trip.user_id == user_id)
-        .options(selectinload(Trip.days).selectinload(TripDay.stops))
+        .options(
+            selectinload(Trip.days).selectinload(TripDay.stops),
+            selectinload(Trip.routes),
+        )
     )
     return result.unique().scalar_one_or_none()
 

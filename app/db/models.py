@@ -197,6 +197,7 @@ class Trip(Base):
     title = Column(String, nullable=False)
     summary = Column(Text, nullable=True)
     start_date = Column(Date, nullable=True)
+    static_map_url = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -206,6 +207,12 @@ class Trip(Base):
         back_populates="trip",
         cascade="all, delete-orphan",
         order_by="TripDay.day_number",
+    )
+    routes = relationship(
+        "TripRoute",
+        back_populates="trip",
+        cascade="all, delete-orphan",
+        order_by="TripRoute.fetched_at",
     )
     # Refine-with-Buddy conversation, if one was created. Do NOT cascade
     # delete — the FK on Conversation.trip_id is ON DELETE SET NULL, so the
@@ -270,8 +277,95 @@ class TripStop(Base):
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
     google_place_id = Column(String, nullable=True)
+    # Server-side enrichment from Google Place Details (or curated `places`
+    # row when the place_id matches one we maintain). Backfilled by
+    # services.trip_enrichment after every save / refine.
+    photo_url = Column(Text, nullable=True)
+    rating = Column(Float, nullable=True)
+    formatted_address = Column(Text, nullable=True)
 
     day = relationship("TripDay", back_populates="stops")
+
+
+class PlaceCache(Base):
+    """Google Place Details responses, keyed by place_id (90-day TTL).
+
+    Miss path for stops whose `google_place_id` is not in the curated
+    `places` table. Curated wins on coverage we control; cache wins on the
+    long tail. See services.google_places.enrich_stop.
+    """
+    __tablename__ = "places_cache"
+
+    google_place_id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    formatted_address = Column(Text, nullable=True)
+    lat = Column(Float, nullable=False)
+    lng = Column(Float, nullable=False)
+    rating = Column(Float, nullable=True)
+    user_ratings_total = Column(Integer, nullable=True)
+    primary_photo_url = Column(Text, nullable=True)
+    additional_photo_urls = Column(JSONB, default=list)
+    types = Column(JSONB, default=list)
+    raw_response = Column(JSONB, nullable=True)
+    fetched_at = Column(DateTime(timezone=True), default=utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class DirectionsCache(Base):
+    """Google Directions polylines, keyed by rounded coords + travel mode.
+
+    Two trips that both go from "near Berat castle" to "Berat town center"
+    share the cached polyline (4-decimal rounding ≈ 10m precision).
+    """
+    __tablename__ = "directions_cache"
+
+    cache_key = Column(String, primary_key=True)
+    encoded_polyline = Column(Text, nullable=False)
+    distance_meters = Column(Integer, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    travel_mode = Column(String, nullable=False)
+    fetched_at = Column(DateTime(timezone=True), default=utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class TripRoute(Base):
+    """Per-trip routing rows linking specific stop pairs to encoded polylines.
+
+    Rebuilt on every save / refine so reorders and stop swaps produce a clean
+    set. Cascade from both Trip and TripDay so deletions cleanup automatically.
+    """
+    __tablename__ = "trip_routes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trip_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trips.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trip_day_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trip_days.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    from_stop_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trip_stops.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    to_stop_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("trip_stops.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    encoded_polyline = Column(Text, nullable=False)
+    distance_meters = Column(Integer, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    travel_mode = Column(String, nullable=False, default="driving")
+    fetched_at = Column(DateTime(timezone=True), default=utcnow)
+
+    trip = relationship("Trip", back_populates="routes")
 
 
 Index(

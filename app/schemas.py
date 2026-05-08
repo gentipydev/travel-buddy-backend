@@ -74,11 +74,27 @@ class TripCreate(BaseModel):
 class TripStopOut(TripStopCreate):
     id: str
     sort_order: int
+    # Server-side enrichment. None when the stop has no `google_place_id` or
+    # when curated/cache/Google all missed (kill switch off + no curated row).
+    photo_url: str | None = None
+    rating: float | None = None
+    formatted_address: str | None = None
 
 
 class TripDayOut(TripDayCreate):
     id: str
     stops: list[TripStopOut]
+
+
+class TripRouteOut(BaseModel):
+    id: str
+    trip_day_id: str
+    from_stop_id: str
+    to_stop_id: str
+    encoded_polyline: str
+    distance_meters: int | None = None
+    duration_seconds: int | None = None
+    travel_mode: Literal["driving", "walking"]
 
 
 class TripOut(BaseModel):
@@ -87,6 +103,10 @@ class TripOut(BaseModel):
     summary: str | None = None
     start_date: date | None = None
     days: list[TripDayOut]
+    # Signed Google Static Maps URL covering all stops; None when the trip
+    # has no geo'd stops or when both kill switches are off.
+    static_map_url: str | None = None
+    routes: list[TripRouteOut] = []
     created_at: str
     updated_at: str
 

@@ -29,7 +29,7 @@ from app.services.telemetry import (
     new_request_id,
     utc_now_iso,
 )
-from app.services.trips_service import _serialize, replace_trip_from_payload
+from app.services.trips_service import replace_trip_from_payload, serialize_trip
 from app.sse import encode_sse_text
 
 
@@ -170,7 +170,7 @@ async def chat_stream(
                                     itinerary_emitted = True
                                     yield (
                                         "event: trip_refined\n"
-                                        f"data: {json.dumps(_serialize(updated))}\n\n"
+                                        f"data: {json.dumps(await serialize_trip(db, updated))}\n\n"
                                     )
                                 except Exception:
                                     # Roll back any partial flush so the next
@@ -237,7 +237,7 @@ async def chat_stream(
                             itinerary_emitted = True
                             yield (
                                 "event: trip_refined\n"
-                                f"data: {json.dumps(_serialize(latest))}\n\n"
+                                f"data: {json.dumps(await serialize_trip(db, latest))}\n\n"
                             )
                         except Exception as e:
                             await db.rollback()

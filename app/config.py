@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
+    # Google Maps Platform — Place Details (photos, rating, address) and
+    # Directions (routed polylines) called from services.trip_enrichment.
+    # Both `_enabled` flags are kill switches for cost control: setting either
+    # to false (or leaving the API key empty) makes the corresponding service
+    # short-circuit to None, and trip saves proceed without that data.
+    # Curated `places` lookups bypass the kill switch — they're local-only.
+    google_api_key: str = ""
+    google_url_signing_secret: str = ""
+    google_places_enabled: bool = True
+    google_directions_enabled: bool = True
+
     # Logging — drives `setup_logging()` in `app/main.py`. `log_format='json'`
     # is the production default (Render Logs UI filters per-field on JSON);
     # set `LOG_FORMAT=text` locally for human-friendly output.
