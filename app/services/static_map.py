@@ -147,13 +147,17 @@ def build_static_map_url(
                 spec.append(f"label:{label}")
             for lat, lng in points:
                 spec.append(f"{lat},{lng}")
-            params.append("markers=" + quote("|".join(spec), safe=":,|"))
+            # Encode `|` as %7C: clients (e.g. Dart's Image.network) re-encode
+            # `|` before transmission. Signing the encoded form keeps the bytes
+            # the server signs identical to the bytes Google receives, so the
+            # HMAC verifies. Leaving `|` literal here causes a 403 from Google.
+            params.append("markers=" + quote("|".join(spec), safe=":,"))
         for poly_index, enc in enumerate(polylines):
             color = _color_for(poly_index)
             params.append(
                 f"path=" + quote(
                     f"enc:{enc}|color:{color}|weight:4",
-                    safe=":,|",
+                    safe=":,",
                 )
             )
         if api_key:
