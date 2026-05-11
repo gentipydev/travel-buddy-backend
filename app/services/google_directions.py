@@ -18,14 +18,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import DirectionsCache
+from app.services.geo import haversine_km
 
 
 logger = logging.getLogger(__name__)
 
 
 _DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
+_ROADS_URL = "https://roads.googleapis.com/v1/nearestRoads"
 _HTTP_TIMEOUT = 5.0
 _CACHE_TTL = timedelta(days=90)
+# When the first Directions call returns no path, both stop coords are
+# snapped to their nearest road and Directions is retried. We reject the
+# retry if either endpoint moved farther than this — the stop genuinely
+# isn't near a routable road, and a polyline that visibly starts >250 m
+# away from its marker is worse than no polyline.
+_MAX_SNAP_METERS = 250.0
 
 
 def _http_client() -> httpx.AsyncClient:
@@ -54,7 +62,14 @@ async def get_route(
     to_lng: float,
     mode: Literal["driving", "walking"] = "driving",
 ) -> DirectionsCache | None:
-    """Return a cached or freshly-fetched route. None on disabled / failure."""
+    """Return a cached or freshly-fetched route. None on disabled / failure.
+
+    On a first-attempt failure (ZERO_RESULTS, timeout, etc.) the endpoints
+    are snapped to their nearest road via the Roads API and Directions is
+    retried. The cache key stays anchored to the *original* coords so a
+    successful retry caches under the caller's coords (next call short-
+    circuits to cache without re-snapping).
+    """
     started = time.perf_counter()
     key = _cache_key(from_lat, from_lng, to_lat, to_lng, mode)
 
@@ -76,8 +91,94 @@ async def get_route(
         to_lng=to_lng,
         mode=mode,
     )
-    _log_done(key, "fresh" if fresh else "missing", started)
-    return fresh
+    if fresh is not None:
+        _log_done(key, "fresh", started)
+        return fresh
+
+    snapped = await _snap_to_roads([(from_lat, from_lng), (to_lat, to_lng)])
+    if snapped is None:
+        _log_done(key, "missing_snap_failed", started)
+        return None
+    (snap_from_lat, snap_from_lng), (snap_to_lat, snap_to_lng) = snapped
+    from_drift_m = (
+        haversine_km(from_lat, from_lng, snap_from_lat, snap_from_lng) * 1000.0
+    )
+    to_drift_m = (
+        haversine_km(to_lat, to_lng, snap_to_lat, snap_to_lng) * 1000.0
+    )
+    if from_drift_m > _MAX_SNAP_METERS or to_drift_m > _MAX_SNAP_METERS:
+        _log_done(key, "missing_snap_too_far", started)
+        return None
+
+    retry = await _fetch_and_cache(
+        db,
+        key=key,
+        from_lat=snap_from_lat,
+        from_lng=snap_from_lng,
+        to_lat=snap_to_lat,
+        to_lng=snap_to_lng,
+        mode=mode,
+    )
+    _log_done(
+        key,
+        "fresh_after_snap" if retry else "missing_after_snap",
+        started,
+    )
+    return retry
+
+
+async def _snap_to_roads(
+    points: list[tuple[float, float]],
+) -> list[tuple[float, float]] | None:
+    """Snap each (lat, lng) to its nearest road via Google Roads API.
+
+    Returns coords in the same order as [points], or None on any failure
+    (Roads API disabled in GCP, network error, partial response).
+    Uses the same API key as Directions; a 403 here typically means the
+    Roads API isn't enabled for this key.
+    """
+    if not points or not settings.google_api_key:
+        return None
+    points_param = "|".join(f"{lat},{lng}" for lat, lng in points)
+    try:
+        async with _http_client() as client:
+            resp = await client.get(
+                _ROADS_URL,
+                params={
+                    "points": points_param,
+                    "key": settings.google_api_key,
+                },
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "google_api=roads_nearest status=%s", resp.status_code
+                )
+                return None
+            data = resp.json()
+    except (httpx.RequestError, httpx.TimeoutException) as exc:
+        logger.warning(
+            "google_api=roads_nearest error=%s", type(exc).__name__
+        )
+        return None
+    except Exception:
+        logger.exception("google_api=roads_nearest unexpected")
+        return None
+
+    snapped = data.get("snappedPoints") or []
+    # Build originalIndex → (lat, lng). Fail closed if any input is missing —
+    # Directions needs both endpoints.
+    by_idx: dict[int, tuple[float, float]] = {}
+    for entry in snapped:
+        idx = entry.get("originalIndex")
+        loc = entry.get("location") or {}
+        lat = loc.get("latitude")
+        lng = loc.get("longitude")
+        if idx is None or lat is None or lng is None:
+            continue
+        by_idx[idx] = (lat, lng)
+    if len(by_idx) < len(points):
+        return None
+    return [by_idx[i] for i in range(len(points))]
 
 
 async def _read_cache(

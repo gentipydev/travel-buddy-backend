@@ -16,6 +16,7 @@ from app.services.google_directions import _cache_key, get_route
 
 
 GOOGLE_URL = "https://maps.googleapis.com/maps/api/directions/json"
+ROADS_URL = "https://roads.googleapis.com/v1/nearestRoads"
 
 
 def _stub_settings(monkeypatch, *, key="dummy-key", directions_enabled=True):
@@ -145,17 +146,154 @@ async def test_zero_routes_returns_none_without_caching(
     fake_db, mock_http, monkeypatch
 ):
     """Directions API can return ZERO_RESULTS (e.g. unreachable). Don't
-    cache an empty result — let the orchestrator draw a straight line and
-    retry next save."""
+    cache an empty result. Snap-retry is then attempted; if Roads returns
+    nothing too, the final answer is None."""
     _stub_settings(monkeypatch)
     fake_db.queue(None)
     mock_http.on(
         GOOGLE_URL,
         lambda req: httpx.Response(200, json={"status": "ZERO_RESULTS", "routes": []}),
     )
+    # Roads API also yields nothing → no retry possible, final None.
+    mock_http.on(
+        ROADS_URL,
+        lambda req: httpx.Response(200, json={"snappedPoints": []}),
+    )
 
     row = await get_route(fake_db, 40.5, 19.5, 40.6, 19.6)
 
     assert row is None
-    # Only the one read execution — no upsert path was triggered.
+    # Only the one read execution — neither original nor snapped fetch upserted.
+    assert len(fake_db.executed) == 1
+
+
+def _roads_response(snapped: list[tuple[int, float, float]]) -> httpx.Response:
+    """Build a Roads API response. [snapped] = list of (originalIndex, lat, lng)."""
+    return httpx.Response(
+        200,
+        json={
+            "snappedPoints": [
+                {
+                    "location": {"latitude": lat, "longitude": lng},
+                    "originalIndex": idx,
+                    "placeId": f"road_{idx}",
+                }
+                for idx, lat, lng in snapped
+            ]
+        },
+    )
+
+
+async def test_snap_retry_succeeds_when_first_directions_fails(
+    fake_db, mock_http, monkeypatch
+):
+    """First Directions call ZERO_RESULTS → snap both endpoints → retry
+    Directions with snapped coords → success cached under the ORIGINAL key."""
+    _stub_settings(monkeypatch)
+    key = _cache_key(40.5, 19.5, 40.6, 19.6, "driving")
+    # Cache miss (1), upsert (2), re-read after upsert (3) — same three-execute
+    # sequence as test_fresh_fetch_writes_cache.
+    fake_db.queue(None)
+    fake_db.queue(None)
+    fake_db.queue(_cached_row(key))
+
+    directions_calls = []
+
+    def directions_handler(req):
+        directions_calls.append(req)
+        # First call returns ZERO_RESULTS, second (after snap) returns success.
+        if len(directions_calls) == 1:
+            return httpx.Response(
+                200, json={"status": "ZERO_RESULTS", "routes": []}
+            )
+        return _directions_response("snapped_poly")
+
+    mock_http.on(GOOGLE_URL, directions_handler)
+    # Snap moves each endpoint ~10m (well under 250m).
+    mock_http.on(
+        ROADS_URL,
+        lambda req: _roads_response(
+            [(0, 40.50009, 19.50009), (1, 40.60009, 19.60009)]
+        ),
+    )
+
+    row = await get_route(fake_db, 40.5, 19.5, 40.6, 19.6, "driving")
+
+    assert row is not None
+    # Two Directions calls (original + retry) + one Roads call.
+    assert len(directions_calls) == 2
+    assert len(mock_http.requests) == 3
+    # Three DB executes confirms upsert happened (under the original key).
+    assert len(fake_db.executed) == 3
+
+
+async def test_snap_retry_skipped_when_first_directions_succeeds(
+    fake_db, mock_http, monkeypatch
+):
+    """Sanity: no Roads API call when the original Directions call works."""
+    _stub_settings(monkeypatch)
+    key = _cache_key(40.5, 19.5, 40.6, 19.6, "driving")
+    fake_db.queue(None)
+    fake_db.queue(None)
+    fake_db.queue(_cached_row(key))
+    mock_http.on(GOOGLE_URL, lambda req: _directions_response("first_try"))
+    # Register a Roads handler that would fail the test if invoked.
+    roads_calls: list = []
+
+    def roads_handler(req):
+        roads_calls.append(req)
+        return httpx.Response(500)
+
+    mock_http.on(ROADS_URL, roads_handler)
+
+    row = await get_route(fake_db, 40.5, 19.5, 40.6, 19.6)
+
+    assert row is not None
+    assert roads_calls == []
+
+
+async def test_snap_too_far_returns_none(fake_db, mock_http, monkeypatch):
+    """If the Roads API moves an endpoint > _MAX_SNAP_METERS from its
+    original coord, reject the retry — a polyline starting visibly off-
+    marker is worse than no polyline."""
+    _stub_settings(monkeypatch)
+    fake_db.queue(None)
+    directions_calls: list = []
+
+    def directions_handler(req):
+        directions_calls.append(req)
+        return httpx.Response(200, json={"status": "ZERO_RESULTS", "routes": []})
+
+    mock_http.on(GOOGLE_URL, directions_handler)
+    # Move the FROM endpoint ~7 km from the original — well past 250m.
+    mock_http.on(
+        ROADS_URL,
+        lambda req: _roads_response(
+            [(0, 40.56, 19.56), (1, 40.60009, 19.60009)]
+        ),
+    )
+
+    row = await get_route(fake_db, 40.5, 19.5, 40.6, 19.6)
+
+    assert row is None
+    # Only the original Directions call — the snapped retry was rejected.
+    assert len(directions_calls) == 1
+    # No upsert path was triggered, only the initial cache-miss read.
+    assert len(fake_db.executed) == 1
+
+
+async def test_snap_api_failure_returns_none(fake_db, mock_http, monkeypatch):
+    """If the Roads API itself errors (e.g. 403 because Roads isn't
+    enabled in GCP), the retry path bails cleanly with None."""
+    _stub_settings(monkeypatch)
+    fake_db.queue(None)
+    mock_http.on(
+        GOOGLE_URL,
+        lambda req: httpx.Response(200, json={"status": "ZERO_RESULTS", "routes": []}),
+    )
+    mock_http.on(ROADS_URL, lambda req: httpx.Response(403))
+
+    row = await get_route(fake_db, 40.5, 19.5, 40.6, 19.6)
+
+    assert row is None
     assert len(fake_db.executed) == 1

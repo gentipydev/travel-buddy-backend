@@ -7,14 +7,15 @@ incidentally so the regression net is wide.
 from urllib.parse import unquote
 
 from app.services.static_map import (
-    _label_for_stop,
+    _label_for_anchor,
     build_static_map_url,
     decode_polyline,
     encode_polyline,
 )
 
 
-def test_url_emits_one_marker_per_stop_with_unique_labels():
+def test_url_emits_one_marker_per_day_at_centroid():
+    # Day 1: two stops, centroid (40.55, 19.55). Day 2: one stop (its own pos).
     url = build_static_map_url(
         api_key="k",
         signing_secret="",
@@ -25,49 +26,63 @@ def test_url_emits_one_marker_per_stop_with_unique_labels():
         polylines=[],
     )
     decoded = unquote(url)
-    # 3 stops total → 3 markers= params with unique labels 1, 2, 3.
-    assert decoded.count("markers=") == 3
-    # Day color still applied per day; day 1's two stops share the brand
-    # warm-orange (accent1), day 2 is terracotta.
-    assert decoded.count("0xe4935d") == 2
-    assert "0xa8453e" in decoded
-    # Each stop gets a unique label in trip order.
+    # Two non-empty days → exactly two markers= params (down from per-stop = 3).
+    assert decoded.count("markers=") == 2
+    # Day 1 centroid coords; day 2 single-stop position.
+    assert "40.55,19.55" in decoded
+    assert "41.0,20.0" in decoded
+    # Per-day colors preserved.
+    assert "0xe4935d" in decoded   # day 1 (accent1)
+    assert "0xa8453e" in decoded   # day 2 (terracotta)
+    # Per-day labels (1, 2), not per-stop (1, 2, 3).
     assert "label:1" in decoded
     assert "label:2" in decoded
-    assert "label:3" in decoded
-    assert "40.5,19.5" in decoded
-    assert "40.6,19.6" in decoded
-    assert "41.0,20.0" in decoded
+    assert "label:3" not in decoded
 
 
-def test_label_for_stop_alphabet_rule():
-    # 1..9 for the first nine stops.
-    assert [_label_for_stop(i) for i in range(9)] == list("123456789")
-    # A..Z for the next 26 stops.
-    assert [_label_for_stop(9 + i) for i in range(26)] == list(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    )
-    # Unlabeled past stop 35 — the visual is fine without it.
-    assert _label_for_stop(35) is None
-    assert _label_for_stop(100) is None
-
-
-def test_url_omits_label_past_stop_35():
-    # 36 stops in one day; the 36th stop should be unlabeled.
-    points = [(40.0 + i * 0.001, 19.0) for i in range(36)]
+def test_empty_day_drops_marker_but_does_not_shift_day_color():
+    # Day 1 empty → no marker emitted, no color slot consumed; day 2 stays terracotta.
     url = build_static_map_url(
         api_key="k",
         signing_secret="",
-        markers_by_day=[points],
+        markers_by_day=[
+            [],
+            [(41.0, 20.0)],
+        ],
         polylines=[],
     )
     decoded = unquote(url)
-    assert decoded.count("markers=") == 36
-    # Last stop (index 35): coords present but no label embedded for it.
-    assert "label:Z" in decoded
-    last_marker_segment = decoded.rsplit("markers=", 1)[-1]
-    assert "label:" not in last_marker_segment
-    assert "40.035,19.0" in last_marker_segment
+    assert decoded.count("markers=") == 1
+    # The emitted marker is at day-index 1 → terracotta and label 2.
+    assert "0xa8453e" in decoded
+    assert "label:2" in decoded
+
+
+def test_label_for_anchor_alphabet_rule():
+    # 1..9 for the first nine days.
+    assert [_label_for_anchor(i) for i in range(9)] == list("123456789")
+    # A..Z for the next 26 days (theoretical; real trips are <= a handful).
+    assert [_label_for_anchor(9 + i) for i in range(26)] == list(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    )
+    # Unlabeled past day 35 — the visual is fine without it.
+    assert _label_for_anchor(35) is None
+    assert _label_for_anchor(100) is None
+
+
+def test_url_includes_app_palette_style_params():
+    url = build_static_map_url(
+        api_key="k",
+        signing_secret="",
+        markers_by_day=[[(40.5, 19.5)]],
+        polylines=[],
+    )
+    decoded = unquote(url)
+    # AppColors-derived base-map style applied: landscape uses AppColors.offWhite,
+    # POI dots are off so they don't fight our day anchors.
+    assert "feature:landscape|color:0xF8ECE5" in decoded
+    assert "feature:poi|visibility:off" in decoded
+    assert "feature:water|color:0x9BB7C2" in decoded
 
 
 def test_url_includes_polylines_with_distinct_colors():
