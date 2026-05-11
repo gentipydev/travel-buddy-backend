@@ -281,6 +281,10 @@ class TripStop(Base):
     # row when the place_id matches one we maintain). Backfilled by
     # services.trip_enrichment after every save / refine.
     photo_url = Column(Text, nullable=True)
+    # Ordered photo list, primary at index 0. Mirrors `photo_url` (which
+    # stays as the single-photo back-compat fallback for old clients).
+    # Capped at 3 in `_apply_to_stop` to match what the UI renders.
+    photos = Column(JSONB, nullable=False, server_default="[]")
     rating = Column(Float, nullable=True)
     formatted_address = Column(Text, nullable=True)
 

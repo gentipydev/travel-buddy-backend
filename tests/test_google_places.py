@@ -214,10 +214,108 @@ async def test_photo_resolution_failure_keeps_other_fields(
     assert result is not None
     assert result.source == "fresh"
     assert result.photo_url is None
+    assert result.additional_photos == []
     assert result.rating == 4.2
     assert result.formatted_address == "Test St, Tirana"
     # Cache row was still written.
     assert len(fake_db.executed) == 3
+
+
+# -- Multi-photo (added with migration 014) -------------------------------
+
+
+async def test_curated_returns_all_photos_not_just_primary(
+    fake_db, mock_http, monkeypatch
+):
+    """Curated rows can carry multiple photos in the JSONB column. The
+    enrichment result must surface them as `additional_photos` so the
+    `_StopPhotoStack` UI can render hero + thumbs."""
+    _stub_settings(monkeypatch)
+    place = _curated_place()
+    place.photos = [
+        "https://supabase.example/p1.jpg",
+        "https://supabase.example/p2.jpg",
+        "https://supabase.example/p3.jpg",
+    ]
+    fake_db.queue(place)
+
+    result = await enrich_stop(fake_db, "ChIJtest")
+
+    assert result is not None
+    assert result.source == "curated"
+    assert result.photo_url == "https://supabase.example/p1.jpg"
+    assert result.additional_photos == [
+        "https://supabase.example/p2.jpg",
+        "https://supabase.example/p3.jpg",
+    ]
+
+
+async def test_cache_returns_additional_photos_from_jsonb(
+    fake_db, mock_http, monkeypatch
+):
+    """Cache rows persist `additional_photo_urls` from the original Google
+    fetch (places_cache.additional_photo_urls JSONB). The hot path reads
+    them straight off the row — no second Google call."""
+    _stub_settings(monkeypatch)
+    cached = _cached_place()
+    cached.additional_photo_urls = [
+        "https://lh3.googleusercontent.example/cached2.jpg",
+        "https://lh3.googleusercontent.example/cached3.jpg",
+    ]
+    fake_db.queue(None)      # curated miss
+    fake_db.queue(cached)    # cache hit
+
+    result = await enrich_stop(fake_db, "ChIJtest")
+
+    assert result is not None
+    assert result.source == "cache"
+    assert result.photo_url == "https://lh3.googleusercontent.example/cached.jpg"
+    assert result.additional_photos == [
+        "https://lh3.googleusercontent.example/cached2.jpg",
+        "https://lh3.googleusercontent.example/cached3.jpg",
+    ]
+    # No Google call for cache hits.
+    assert mock_http.requests == []
+
+
+async def test_fresh_resolves_multiple_photo_refs(
+    fake_db, mock_http, monkeypatch
+):
+    """When Google Place Details returns multiple `photo_reference`s,
+    `_resolve_photos` redirects each through `/place/photo` and the
+    enrichment result returns the first as `photo_url` and the rest as
+    `additional_photos`."""
+    _stub_settings(monkeypatch)
+    fake_db.queue(None)   # curated miss
+    fake_db.queue(None)   # cache miss
+
+    mock_http.on(
+        GOOGLE_DETAILS_URL,
+        lambda req: _details_response(["refA", "refB", "refC"]),
+    )
+    # Each photo redirect resolves to a unique target — order matches the
+    # order of the photo_reference list (Google preserves it).
+    photo_targets = iter([
+        "https://lh3.googleusercontent.example/A.jpg",
+        "https://lh3.googleusercontent.example/B.jpg",
+        "https://lh3.googleusercontent.example/C.jpg",
+    ])
+    mock_http.on(
+        GOOGLE_PHOTO_URL,
+        lambda req: _photo_redirect(next(photo_targets)),
+    )
+
+    result = await enrich_stop(fake_db, "ChIJtest")
+
+    assert result is not None
+    assert result.source == "fresh"
+    assert result.photo_url == "https://lh3.googleusercontent.example/A.jpg"
+    assert result.additional_photos == [
+        "https://lh3.googleusercontent.example/B.jpg",
+        "https://lh3.googleusercontent.example/C.jpg",
+    ]
+    # 1 details call + 3 photo redirects = 4 HTTP calls.
+    assert len(mock_http.requests) == 4
 
 
 def _textsearch_response(

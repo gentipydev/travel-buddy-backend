@@ -64,6 +64,7 @@ def _serialize(trip: Trip) -> dict:
                         "lng": stop.lng,
                         "google_place_id": stop.google_place_id,
                         "photo_url": stop.photo_url,
+                        "photos": list(stop.photos or []),
                         "rating": stop.rating,
                         "formatted_address": stop.formatted_address,
                     }

@@ -45,6 +45,11 @@ _CACHE_TTL = timedelta(days=90)
 @dataclass
 class EnrichmentResult:
     photo_url: str | None
+    # Photos beyond the primary, in the order Google returned them. Empty for
+    # curated rows with at most one photo or when the API returned a single
+    # reference. The caller composes `[photo_url] + additional_photos` (capped)
+    # to write `TripStop.photos`.
+    additional_photos: list[str]
     rating: float | None
     formatted_address: str | None
     lat: float | None
@@ -102,6 +107,7 @@ async def _read_curated(
     )
     return EnrichmentResult(
         photo_url=photos[0] if photos else None,
+        additional_photos=photos[1:],
         rating=place.rating,
         formatted_address=address,
         lat=place.latitude,
@@ -125,6 +131,7 @@ async def _read_cache(
         return None
     return EnrichmentResult(
         photo_url=row.primary_photo_url,
+        additional_photos=list(row.additional_photo_urls or []),
         rating=row.rating,
         formatted_address=row.formatted_address,
         lat=row.lat,
@@ -217,6 +224,7 @@ async def _fetch_and_cache(
 
     return EnrichmentResult(
         photo_url=primary,
+        additional_photos=additional,
         rating=result.get("rating"),
         formatted_address=formatted,
         lat=lat,

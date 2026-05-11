@@ -225,6 +225,11 @@ async def _resolve_missing_place_ids(stops: Sequence[TripStop]) -> None:
 def _apply_to_stop(stop: TripStop, result: EnrichmentResult) -> None:
     if result.photo_url is not None:
         stop.photo_url = result.photo_url
+    # Always write `photos` so the list stays in sync with the enrichment we
+    # just resolved (a re-enrichment that returns fewer photos shouldn't leave
+    # stale entries from the previous run). Cap at 3 — that's all the UI uses.
+    primary = [result.photo_url] if result.photo_url else []
+    stop.photos = (primary + result.additional_photos)[:3]
     if result.rating is not None:
         stop.rating = result.rating
     if result.formatted_address is not None:

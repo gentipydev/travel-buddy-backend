@@ -77,6 +77,9 @@ class TripStopOut(TripStopCreate):
     # Server-side enrichment. None when the stop has no `google_place_id` or
     # when curated/cache/Google all missed (kill switch off + no curated row).
     photo_url: str | None = None
+    # Ordered list, primary at index 0. Empty for un-enriched / pre-014 rows;
+    # the client falls back to `[photo_url]` in that case.
+    photos: list[str] = Field(default_factory=list)
     rating: float | None = None
     formatted_address: str | None = None
 
