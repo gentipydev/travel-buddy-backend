@@ -14,13 +14,15 @@ from urllib.parse import quote
 
 
 _BASE_URL = "https://maps.googleapis.com/maps/api/staticmap"
-# Color cycle — matches the buddy palette. Repeats after 5 days.
+# Warm Mediterranean palette anchored on AppColors.accent1. Mirrors
+# `kDayColors` in travel-buddy-mobile/lib/ui/screens/trip_map/trip_map_colors.dart.
+# Repeats after 5 days.
 _DAY_COLORS = (
-    "0xff5470",  # pink
-    "0xffa500",  # orange
-    "0x9b59b6",  # purple
-    "0x3ec1d3",  # teal
-    "0x2ecc71",  # green
+    "0xe4935d",  # Day 1 — accent1 (brand warm orange)
+    "0xa8453e",  # Day 2 — terracotta
+    "0xc9a55a",  # Day 3 — warm gold
+    "0x6b8e5c",  # Day 4 — olive sage
+    "0x5a7a8e",  # Day 5 — Adriatic slate
 )
 _MAX_URL_LEN = 7800   # margin under Google's ~8192 hard cap
 
@@ -29,14 +31,18 @@ def _color_for(day_index: int) -> str:
     return _DAY_COLORS[day_index % len(_DAY_COLORS)]
 
 
-def _label_for(day_index: int) -> str | None:
-    """Single-char label for the day. Static Maps allows {0-9, A-Z}; we use
-    1-9 then A-Z, dropping the label past day 35 (the visual is fine without
-    it for very long trips)."""
-    if day_index < 9:
-        return str(day_index + 1)
-    if day_index < 35:
-        return chr(ord("A") + (day_index - 9))
+def _label_for_stop(stop_index: int) -> str | None:
+    """Single-char label for a stop's position in the trip's overall stop
+    order. Static Maps allows {0-9, A-Z}; we use 1-9 then A-Z, dropping
+    the label past stop 35 (the visual is fine without it for very long trips).
+
+    Per-stop (not per-day) labeling: every marker gets its own unique label,
+    so two stops never share a digit. Day grouping comes from `_color_for`.
+    """
+    if stop_index < 9:
+        return str(stop_index + 1)
+    if stop_index < 35:
+        return chr(ord("A") + (stop_index - 9))
     return None
 
 
@@ -134,21 +140,24 @@ def build_static_map_url(
             f"size={width}x{height}",
             f"maptype={quote(map_type)}",
         ]
+        # One markers= param per stop — each gets a unique single-char label
+        # in trip order (1..9 then A..Z; unlabeled past 35). Day color is
+        # still applied per day so the visual grouping is preserved.
+        stop_index = 0
         for day_index, points in enumerate(markers_by_day):
-            if not points:
-                continue
             color = _color_for(day_index)
-            label = _label_for(day_index)
-            spec = [f"color:{color}"]
-            if label is not None:
-                spec.append(f"label:{label}")
             for lat, lng in points:
+                label = _label_for_stop(stop_index)
+                spec = [f"color:{color}"]
+                if label is not None:
+                    spec.append(f"label:{label}")
                 spec.append(f"{lat},{lng}")
-            # Encode `|` as %7C: clients (e.g. Dart's Image.network) re-encode
-            # `|` before transmission. Signing the encoded form keeps the bytes
-            # the server signs identical to the bytes Google receives, so the
-            # HMAC verifies. Leaving `|` literal here causes a 403 from Google.
-            params.append("markers=" + quote("|".join(spec), safe=":,"))
+                # Encode `|` as %7C: clients (e.g. Dart's Image.network) re-encode
+                # `|` before transmission. Signing the encoded form keeps the bytes
+                # the server signs identical to the bytes Google receives, so the
+                # HMAC verifies. Leaving `|` literal here causes a 403 from Google.
+                params.append("markers=" + quote("|".join(spec), safe=":,"))
+                stop_index += 1
         for poly_index, enc in enumerate(polylines):
             color = _color_for(poly_index)
             params.append(

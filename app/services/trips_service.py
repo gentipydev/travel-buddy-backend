@@ -122,6 +122,13 @@ serialize_trip = _enrich_and_serialize
 async def _load_trip(
     db: AsyncSession, trip_id: UUID, user_id: int
 ) -> Trip | None:
+    # populate_existing=True overwrites any stale state in the session
+    # identity map. Required because the engine uses expire_on_commit=False:
+    # when `enrich_trip` commits new trip_routes rows mid-request, the Trip
+    # already in the identity map keeps its pre-enrichment `routes=[]`
+    # snapshot, and selectinload alone won't refresh an already-loaded
+    # collection. Without this, the API response serializes 0 routes even
+    # when enrich_trip logged routes=N/N.
     result = await db.execute(
         select(Trip)
         .where(Trip.id == trip_id, Trip.user_id == user_id)
@@ -129,6 +136,7 @@ async def _load_trip(
             selectinload(Trip.days).selectinload(TripDay.stops),
             selectinload(Trip.routes),
         )
+        .execution_options(populate_existing=True)
     )
     return result.unique().scalar_one_or_none()
 

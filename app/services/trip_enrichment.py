@@ -242,7 +242,11 @@ async def _create_routes(
     days: Sequence[TripDay],
 ) -> tuple[int, int]:
     """Schedule one Directions call per consecutive (lat,lng)-bearing stop
-    pair within the same day. Returns (attempted, created)."""
+    pair within the same day, plus one per consecutive-day transition
+    (last geo'd stop of day N → first geo'd stop of day N+1). Cross-day
+    routes are owned by the next day and rendered as dashed-grey on the
+    client to read as "transit between days." Returns (attempted, created).
+    """
     pairs: list[tuple[TripDay, TripStop, TripStop]] = []
     for day in days:
         ordered = sorted(day.stops, key=lambda s: s.sort_order)
@@ -252,6 +256,30 @@ async def _create_routes(
                 and nxt.lat is not None and nxt.lng is not None
             ):
                 pairs.append((day, prev, nxt))
+
+    # Cross-day pairs: last geo'd stop of day N → first geo'd stop of day N+1.
+    # Owned by next_day so the route's trip_day_id matches the day the
+    # traveler is heading INTO. Skipped when either side has no coords.
+    for prev_day, next_day in zip(days, days[1:]):
+        prev_ordered = sorted(prev_day.stops, key=lambda s: s.sort_order)
+        next_ordered = sorted(next_day.stops, key=lambda s: s.sort_order)
+        last = next(
+            (
+                s for s in reversed(prev_ordered)
+                if s.lat is not None and s.lng is not None
+            ),
+            None,
+        )
+        first = next(
+            (
+                s for s in next_ordered
+                if s.lat is not None and s.lng is not None
+            ),
+            None,
+        )
+        if last is not None and first is not None:
+            pairs.append((next_day, last, first))
+
     if not pairs:
         return 0, 0
 

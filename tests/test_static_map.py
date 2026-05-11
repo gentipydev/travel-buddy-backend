@@ -7,13 +7,14 @@ incidentally so the regression net is wide.
 from urllib.parse import unquote
 
 from app.services.static_map import (
+    _label_for_stop,
     build_static_map_url,
     decode_polyline,
     encode_polyline,
 )
 
 
-def test_url_includes_markers_per_day():
+def test_url_emits_one_marker_per_stop_with_unique_labels():
     url = build_static_map_url(
         api_key="k",
         signing_secret="",
@@ -24,13 +25,49 @@ def test_url_includes_markers_per_day():
         polylines=[],
     )
     decoded = unquote(url)
-    # Two days, so two markers= params with distinct colors.
-    assert decoded.count("markers=") == 2
-    assert "0xff5470" in decoded   # day 1 color
-    assert "0xffa500" in decoded   # day 2 color
+    # 3 stops total → 3 markers= params with unique labels 1, 2, 3.
+    assert decoded.count("markers=") == 3
+    # Day color still applied per day; day 1's two stops share the brand
+    # warm-orange (accent1), day 2 is terracotta.
+    assert decoded.count("0xe4935d") == 2
+    assert "0xa8453e" in decoded
+    # Each stop gets a unique label in trip order.
+    assert "label:1" in decoded
+    assert "label:2" in decoded
+    assert "label:3" in decoded
     assert "40.5,19.5" in decoded
     assert "40.6,19.6" in decoded
     assert "41.0,20.0" in decoded
+
+
+def test_label_for_stop_alphabet_rule():
+    # 1..9 for the first nine stops.
+    assert [_label_for_stop(i) for i in range(9)] == list("123456789")
+    # A..Z for the next 26 stops.
+    assert [_label_for_stop(9 + i) for i in range(26)] == list(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    )
+    # Unlabeled past stop 35 — the visual is fine without it.
+    assert _label_for_stop(35) is None
+    assert _label_for_stop(100) is None
+
+
+def test_url_omits_label_past_stop_35():
+    # 36 stops in one day; the 36th stop should be unlabeled.
+    points = [(40.0 + i * 0.001, 19.0) for i in range(36)]
+    url = build_static_map_url(
+        api_key="k",
+        signing_secret="",
+        markers_by_day=[points],
+        polylines=[],
+    )
+    decoded = unquote(url)
+    assert decoded.count("markers=") == 36
+    # Last stop (index 35): coords present but no label embedded for it.
+    assert "label:Z" in decoded
+    last_marker_segment = decoded.rsplit("markers=", 1)[-1]
+    assert "label:" not in last_marker_segment
+    assert "40.035,19.0" in last_marker_segment
 
 
 def test_url_includes_polylines_with_distinct_colors():
