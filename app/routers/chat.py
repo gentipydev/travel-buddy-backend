@@ -34,7 +34,6 @@ from app.observability import (
 from app.rate_limit import limiter, user_or_ip_key
 from app.schemas import ChatRequest
 
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])

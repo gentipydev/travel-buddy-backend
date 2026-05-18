@@ -55,7 +55,6 @@ from app.tools.refine import (
     apply_refine_tool,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

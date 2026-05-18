@@ -450,6 +450,16 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_anon, caplog
     assert trace["error"] is None
     assert trace["itinerary_emitted"] is False
     assert trace["trip_refine"] is False
+    # Stage telemetry (docs/07 item 4). `prepare_turn` is monkey-patched
+    # out, so context_assembly / rag_* are absent — anthropic_stream is
+    # the stage the real ChatAgent.stream() body still runs.
+    assert isinstance(trace["stage_latencies"], dict)
+    assert "anthropic_stream" in trace["stage_latencies"]
+    assert trace["stage_latencies"]["anthropic_stream"] > 0
+    # Cost derived from the patched usage at Haiku rates:
+    #   50 × $1.00/1M  + 100 × $5.00/1M
+    # + 3000 × $1.25/1M + 1500 × $0.10/1M  =  0.00445
+    assert trace["estimated_cost_usd"] == pytest.approx(0.00445)
 
 
 def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_anon, caplog):
