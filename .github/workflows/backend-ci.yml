@@ -1,0 +1,76 @@
+name: Backend CI
+
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'pytest.ini'
+      - '.github/workflows/backend-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'pytest.ini'
+      - '.github/workflows/backend-ci.yml'
+
+# Cancel superseded runs on the same branch/PR — saves Actions minutes when
+# the user pushes multiple commits in quick succession.
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Placeholder values so `app.config.Settings` loads without complaint
+      # at pytest collection time. Tests mock all outbound calls (Anthropic,
+      # Cohere, Google) so these are never used as real credentials.
+      ANTHROPIC_API_KEY: sk-test-placeholder
+      COHERE_API_KEY: test-placeholder
+      SUPABASE_URL: https://example.supabase.co
+      SUPABASE_ANON_KEY: test-placeholder
+      SUPABASE_SERVICE_KEY: test-placeholder
+      DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+      ALLOWED_ORIGINS: http://localhost:3000
+      GOOGLE_API_KEY: test-placeholder
+      LOG_LEVEL: WARNING
+      LOG_FORMAT: text
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          # Recompute the cache only when either requirements file changes.
+          # Adding/upgrading a single dep is one cache miss; nothing else.
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Ruff (lint)
+        run: ruff check app tests
+
+      - name: Mypy (type-check)
+        # Permissive baseline configured in pyproject.toml. Ratchet rules
+        # on per-module once they're clean.
+        run: mypy app
+
+      - name: Pytest
+        # --cov-fail-under is intentionally 0 for the first green build —
+        # bump to the observed coverage minus a small margin after the
+        # first run lands so this becomes a ratchet, not a tripwire.
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=0

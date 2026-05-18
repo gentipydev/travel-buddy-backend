@@ -1,4 +1,4 @@
-"""Unit tests for app.services.google_directions.get_route.
+"""Unit tests for app.integrations.google_directions.get_route.
 
 Same shape as the places tests minus the curated tier. Cache → API, kill
 switches, failure modes.
@@ -11,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from app.db.models import DirectionsCache
-from app.services import google_directions
-from app.services.google_directions import _cache_key, get_route
+from app.integrations import google_directions
+from app.integrations.google_directions import _cache_key, get_route
 
 
 GOOGLE_URL = "https://maps.googleapis.com/maps/api/directions/json"

@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, decode as jwt_decode
 
 from app.config import settings
-from app.logging_config import user_id_var
+from app.observability import user_id_var
 
 logger = logging.getLogger(__name__)
 

@@ -8,9 +8,10 @@ SELECT to return; the production code's logic is exercised against these
 without a real Postgres or any ORM machinery beyond statement construction.
 
 `MockTransportRegistry` — install per-URL response handlers, then patch the
-private `_http_client` factories in `google_places` and `google_directions`
-to use `httpx.MockTransport`. Each handler can return a Response with any
-status / headers / body, so the photo-redirect path is testable too.
+private `_http_client` factories in `app.integrations.google_places` and
+`app.integrations.google_directions` to use `httpx.MockTransport`. Each
+handler can return a Response with any status / headers / body, so the
+photo-redirect path is testable too.
 
 Requires `pytest` and `pytest-asyncio` (configured via pytest.ini's
 `asyncio_mode = auto`). Install with: `pip install pytest pytest-asyncio`.
@@ -148,14 +149,23 @@ class MockTransportRegistry:
 @pytest.fixture
 def mock_http(monkeypatch) -> MockTransportRegistry:
     """Patch the `_http_client` factories so any AsyncClient created inside
-    the services routes through our handlers instead of the real network."""
+    the services routes through our handlers instead of the real network.
+
+    Also collapses the shared retry-wait policy (`app.integrations._retry`)
+    to `wait_none()` so tests that mock 5xx/429 still exercise the retry
+    decision logic (count, predicate) without paying the 1-8s exponential
+    backoff. Real attempt count is preserved — tests asserting "function
+    returned None on error" still see N attempts in `registry.requests`.
+    """
     registry = MockTransportRegistry()
 
     def factory():
         return httpx.AsyncClient(transport=httpx.MockTransport(registry))
 
-    from app.services import google_directions, google_places
+    from app.integrations import _retry, google_directions, google_places
+    from tenacity import wait_none
 
     monkeypatch.setattr(google_places, "_http_client", factory)
     monkeypatch.setattr(google_directions, "_http_client", factory)
+    monkeypatch.setattr(_retry.http_get_with_retry.retry, "wait", wait_none())
     return registry

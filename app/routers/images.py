@@ -19,7 +19,7 @@ from fastapi import Depends
 
 from app.db.engine import get_session
 from app.db.models import Artifact
-from app.services.storage_service import (
+from app.integrations.supabase_storage import (
     PLACE_PHOTOS_BUCKET,
     get_artifact_image_url,
     list_bucket_folder,

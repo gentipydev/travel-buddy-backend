@@ -1,11 +1,11 @@
-"""Unit tests for app.services.itinerary_validator.
+"""Unit tests for app.tools.itinerary_validator.
 
 Pure pydantic — no FastAPI client, no async, no Anthropic mocks. The validator
 is a thin shape-and-schema gate; tests pin the behaviors the SSE generator and
 Flutter client both depend on.
 """
 
-from app.services.itinerary_validator import validate_itinerary
+from app.tools.itinerary_validator import validate_itinerary
 
 
 def test_valid_minimal_itinerary_passes():

@@ -1,0 +1,351 @@
+"""Trip mutation primitives shared by the trips router and the chat refine
+tools.
+
+Each `apply_*` function loads + mutates + flushes the trip but does NOT
+commit — the caller owns the transaction boundary. This lets a refine
+turn apply tool ops and persist the assistant message in one commit, and
+lets the trips router's HTTP handlers wrap whole requests in a single
+transaction.
+
+`replace_trip_from_payload` is the full re-emit path (Claude's
+`emit_itinerary` tool); the granular `apply_*` functions are the surgical
+patch tools.
+"""
+import logging
+from datetime import date
+from uuid import UUID
+
+from fastapi import HTTPException
+from sqlalchemy import case, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import Trip, TripDay, TripStop, utcnow
+from app.domain.trips.repository import (
+    _load_day,
+    _load_stop,
+    _load_trip,
+    _touch_trip,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+async def replace_trip_from_payload(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    payload: dict,
+) -> Trip:
+    """Atomically replace a trip's days/stops from a validated TripCreate dict.
+
+    Caller owns the transaction — this function flushes but does not commit, so
+    a refine turn can land the trip replace and the assistant-message persist
+    in one boundary. Raises HTTPException(404) if the trip is not owned by
+    `user_id`.
+    """
+    trip = await _load_trip(db, trip_id, user_id)
+    if trip is None:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    trip.title = payload["title"]
+    trip.summary = payload.get("summary")
+    sd = payload.get("start_date")
+    trip.start_date = date.fromisoformat(sd) if sd else None
+    trip.updated_at = utcnow()
+
+    # Clear existing children — cascade="all, delete-orphan" wipes days then
+    # stops as the assignment runs. Flush before re-adding so the
+    # UNIQUE(trip_id, day_number) and UNIQUE(trip_day_id, sort_order)
+    # constraints don't see overlapping old + new rows mid-transaction.
+    trip.days = []
+    await db.flush()
+
+    for day in payload["days"]:
+        new_day = TripDay(
+            day_number=day["day_number"],
+            title=day.get("title"),
+            base_city=day.get("base_city"),
+        )
+        for idx, stop in enumerate(day["stops"]):
+            new_day.stops.append(
+                TripStop(
+                    sort_order=idx,
+                    name=stop["name"],
+                    kind=stop["kind"],
+                    city=stop.get("city"),
+                    address=stop.get("address"),
+                    duration_minutes=stop.get("duration_minutes"),
+                    arrival_time=stop.get("arrival_time"),
+                    end_time=stop.get("end_time"),
+                    transportation=stop.get("transportation"),
+                    notes=stop.get("notes"),
+                    lat=stop.get("lat"),
+                    lng=stop.get("lng"),
+                    google_place_id=stop.get("google_place_id"),
+                )
+            )
+        trip.days.append(new_day)
+    await db.flush()
+
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        # Should be impossible — we just flushed it.
+        raise HTTPException(status_code=500, detail="Trip vanished after replace")
+    return refreshed
+
+
+async def apply_update_trip(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    payload: dict,
+) -> Trip:
+    """Patch trip-level fields (title / summary / start_date). `payload` is the
+    Pydantic `TripUpdate.model_dump(exclude_unset=True)` — only keys present
+    are written. No-commit: caller owns the transaction."""
+    trip = await _load_trip(db, trip_id, user_id)
+    if trip is None:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    for key, value in payload.items():
+        setattr(trip, key, value)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after update")
+    return refreshed
+
+
+async def apply_add_day(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    payload: dict,
+) -> Trip:
+    """Insert a new day. `payload` matches `TripDayCreateBody.model_dump()`:
+    `day_number` (required), optional `title` / `base_city`, and a `stops` list
+    (may be empty). Raises HTTPException(409) on duplicate `day_number`."""
+    trip = await _load_trip(db, trip_id, user_id)
+    if trip is None:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    if any(d.day_number == payload["day_number"] for d in trip.days):
+        raise HTTPException(
+            status_code=409, detail="day_number already exists"
+        )
+    new_day = TripDay(
+        trip_id=trip.id,
+        day_number=payload["day_number"],
+        title=payload.get("title"),
+        base_city=payload.get("base_city"),
+    )
+    for index, stop in enumerate(payload.get("stops") or []):
+        new_day.stops.append(
+            TripStop(
+                sort_order=index,
+                name=stop["name"],
+                kind=stop["kind"],
+                city=stop.get("city"),
+                address=stop.get("address"),
+                duration_minutes=stop.get("duration_minutes"),
+                arrival_time=stop.get("arrival_time"),
+                end_time=stop.get("end_time"),
+                transportation=stop.get("transportation"),
+                notes=stop.get("notes"),
+                lat=stop.get("lat"),
+                lng=stop.get("lng"),
+                google_place_id=stop.get("google_place_id"),
+            )
+        )
+    db.add(new_day)
+    await _touch_trip(db, trip.id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after add_day")
+    return refreshed
+
+
+async def apply_delete_day(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    day_id: UUID,
+) -> Trip:
+    day = await _load_day(db, trip_id, day_id, user_id)
+    if day is None:
+        raise HTTPException(status_code=404, detail="Day not found")
+    await db.delete(day)
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after delete_day")
+    return refreshed
+
+
+async def apply_insert_stop(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    day_id: UUID,
+    payload: dict,
+) -> Trip:
+    """Insert a stop. `payload` matches `TripStopCreateBody.model_dump()`:
+    all `TripStopCreate` fields plus optional `sort_order`. Omit `sort_order`
+    to append; provide it to insert at a position (existing stops at >= that
+    index are shifted up by 1 in a single UPDATE)."""
+    day = await _load_day(db, trip_id, day_id, user_id)
+    if day is None:
+        raise HTTPException(status_code=404, detail="Day not found")
+    body = dict(payload)
+    requested = body.pop("sort_order", None)
+    if requested is None:
+        next_sort = max((s.sort_order for s in day.stops), default=-1) + 1
+        new_stop = TripStop(trip_day_id=day.id, sort_order=next_sort, **body)
+    else:
+        await db.execute(
+            update(TripStop)
+            .where(
+                TripStop.trip_day_id == day.id,
+                TripStop.sort_order >= requested,
+            )
+            .values(sort_order=TripStop.sort_order + 1)
+        )
+        new_stop = TripStop(trip_day_id=day.id, sort_order=requested, **body)
+    db.add(new_stop)
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after insert_stop")
+    return refreshed
+
+
+async def apply_update_stop(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    stop_id: UUID,
+    payload: dict,
+) -> Trip:
+    """Patch a single stop's fields. `payload` is
+    `TripStopUpdate.model_dump(exclude_unset=True)` — only set keys are
+    written, leaving everything else (including google_place_id, lat, lng,
+    sort_order) untouched."""
+    stop = await _load_stop(db, trip_id, stop_id, user_id)
+    if stop is None:
+        raise HTTPException(status_code=404, detail="Stop not found")
+    for key, value in payload.items():
+        setattr(stop, key, value)
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after update_stop")
+    return refreshed
+
+
+async def apply_delete_stop(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    stop_id: UUID,
+) -> Trip:
+    stop = await _load_stop(db, trip_id, stop_id, user_id)
+    if stop is None:
+        raise HTTPException(status_code=404, detail="Stop not found")
+    # Per design: do NOT compact remaining sort_orders on delete. Gaps are
+    # fine; the relationship's `order_by="TripStop.sort_order"` handles it.
+    await db.delete(stop)
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after delete_stop")
+    return refreshed
+
+
+async def apply_reorder_stops(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    day_id: UUID,
+    payload: dict,
+) -> Trip:
+    """Reorder stops within a day. `payload` matches
+    `StopReorderBody.model_dump(exclude_unset=True)` with
+    `order: list[{stop_id, sort_order, arrival_time?, end_time?, duration_minutes?}]`.
+    Caller must send the COMPLETE new ordering so the server can validate the
+    set matches what's on disk. Optional per-item time fields are only written
+    when the caller explicitly included them (legacy {stop_id, sort_order}-only
+    callers leave times untouched)."""
+    day = await _load_day(db, trip_id, day_id, user_id)
+    if day is None:
+        raise HTTPException(status_code=404, detail="Day not found")
+    order_items = payload.get("order") or []
+    # Coerce stop_id strings → UUID for set comparison parity with ORM ids.
+    # Each tuple carries the per-item time-field dict (only keys actually
+    # present in the payload; absent keys mean "leave column untouched", a
+    # null value means "clear the column").
+    parsed_order: list[tuple[UUID, int, dict]] = []
+    for item in order_items:
+        sid = UUID(str(item["stop_id"]))
+        so = int(item["sort_order"])
+        time_fields = {
+            k: item[k]
+            for k in ("arrival_time", "end_time", "duration_minutes")
+            if k in item
+        }
+        parsed_order.append((sid, so, time_fields))
+    current_ids = {s.id for s in day.stops}
+    body_ids = {sid for sid, _, _ in parsed_order}
+    if current_ids != body_ids:
+        raise HTTPException(status_code=409, detail="stop set out of sync")
+    body_orders = sorted(so for _, so, _ in parsed_order)
+    if body_orders != list(range(len(body_orders))):
+        raise HTTPException(
+            status_code=400,
+            detail="sort_order values must be 0..N-1 contiguous",
+        )
+    new_order = {sid: so for sid, so, _ in parsed_order}
+    # Two-phase update to dodge mid-statement UNIQUE(trip_day_id, sort_order)
+    # violations on a permutation. Despite the docs implying constraints are
+    # checked at end-of-statement, PostgreSQL evaluates non-deferrable UNIQUE
+    # per-row during UPDATE — so a swap (e.g. row at sort_order=1 → 2 while
+    # row at sort_order=2 still sits at 2) fails the moment the first row
+    # collides. Shifting every stop in the day into a disjoint negative range
+    # first guarantees the positive 0..N-1 target range is free for phase 2.
+    # Validation above ensures `current_ids == body_ids`, so every row in the
+    # day is addressed by the CASE in phase 2 (no row gets NULL from a
+    # missing WHEN branch).
+    SHIFT = 1_000_000
+    await db.execute(
+        update(TripStop)
+        .where(TripStop.trip_day_id == day.id)
+        .values(sort_order=TripStop.sort_order - SHIFT)
+    )
+    await db.execute(
+        update(TripStop)
+        .where(TripStop.trip_day_id == day.id)
+        .values(sort_order=case(new_order, value=TripStop.id))
+    )
+    for sid, _, time_fields in parsed_order:
+        if not time_fields:
+            continue
+        await db.execute(
+            update(TripStop).where(TripStop.id == sid).values(**time_fields)
+        )
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after reorder")
+    return refreshed

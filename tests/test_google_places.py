@@ -1,4 +1,4 @@
-"""Unit tests for app.services.google_places.enrich_stop.
+"""Unit tests for app.integrations.google_places.enrich_stop.
 
 The three tier paths (curated → cache → fresh), plus the kill-switch and
 failure-mode contracts. Mocks the HTTP layer via the conftest registry; the
@@ -14,8 +14,8 @@ import httpx
 import pytest
 
 from app.db.models import Place, PlaceCache
-from app.services import google_places
-from app.services.google_places import enrich_stop, find_place_id_by_name
+from app.integrations import google_places
+from app.integrations.google_places import enrich_stop, find_place_id_by_name
 
 
 GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
@@ -348,8 +348,89 @@ async def test_textsearch_happy_path(mock_http, monkeypatch):
     )
 
     assert result == ("ChIJsk_text", 41.3275, 19.8187)
-    # Query string should combine name + city for relevance.
-    assert "Skanderbeg%20Square%2C%20Tirana" in str(mock_http.requests[0].url)
+    # Query string combines name + city + "Albania" so an ambiguous English
+    # name can't drift to a same-named locality elsewhere. `region=al` is a
+    # ranking bias; the bbox post-filter is the hard guard.
+    url = str(mock_http.requests[0].url)
+    assert "Skanderbeg%20Square%2C%20Tirana%2C%20Albania" in url
+    assert "region=al" in url
+
+
+async def test_textsearch_no_city_still_includes_albania(mock_http, monkeypatch):
+    _stub_settings(monkeypatch)
+    mock_http.on(GOOGLE_TEXTSEARCH_URL, lambda req: _textsearch_response())
+
+    result = await find_place_id_by_name(name="Skanderbeg Square")
+
+    assert result == ("ChIJsk_text", 41.3275, 19.8187)
+    url = str(mock_http.requests[0].url)
+    assert "Skanderbeg%20Square%2C%20Albania" in url
+    assert "region=al" in url
+
+
+async def test_textsearch_drops_out_of_bounds_result(
+    mock_http, monkeypatch, caplog
+):
+    """The smoking-gun failure: Google returns a US business for an
+    ambiguous English name. The bbox post-filter must refuse to write
+    those coords onto the stop, regardless of the name+region bias."""
+    _stub_settings(monkeypatch)
+    # Brooklyn coords (the actual production failure pattern).
+    mock_http.on(
+        GOOGLE_TEXTSEARCH_URL,
+        lambda req: _textsearch_response(
+            place_id="ChIJbrooklyn", lat=40.65, lng=-73.95
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.services.google_places"):
+        result = await find_place_id_by_name(
+            name="Mediterranean Cafe", city="Tirana"
+        )
+
+    assert result is None
+    assert any(
+        "dropped=out_of_bounds" in rec.getMessage() for rec in caplog.records
+    )
+
+
+async def test_fetch_and_cache_drops_out_of_bounds_geometry(
+    fake_db, mock_http, monkeypatch
+):
+    """If a Place Details response has a non-AL geometry (e.g. Claude
+    emitted a bogus place_id that points outside Albania), we must not
+    seed the cache with that row — a future caller with the same id
+    would still pull the wrong country."""
+    _stub_settings(monkeypatch)
+    fake_db.queue(None)   # curated miss
+    fake_db.queue(None)   # cache miss
+
+    def _us_details(req):
+        return httpx.Response(
+            200,
+            json={
+                "status": "OK",
+                "result": {
+                    "place_id": "ChIJus",
+                    "name": "Tirana Restaurant",
+                    "formatted_address": "123 Main St, Brooklyn, NY",
+                    "geometry": {"location": {"lat": 40.65, "lng": -73.95}},
+                    "rating": 4.4,
+                    "user_ratings_total": 200,
+                    "photos": [],
+                    "types": ["restaurant"],
+                },
+            },
+        )
+
+    mock_http.on(GOOGLE_DETAILS_URL, _us_details)
+
+    result = await enrich_stop(fake_db, "ChIJus")
+
+    assert result is None
+    # Exactly two executes ran (curated + cache SELECT). The cache INSERT
+    # must NOT have run — otherwise the bad row would poison future hits.
+    assert len(fake_db.executed) == 2
 
 
 async def test_textsearch_zero_results_returns_none(mock_http, monkeypatch):

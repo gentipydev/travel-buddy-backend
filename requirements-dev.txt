@@ -1,1 +1,5 @@
 pytest==8.3.4
+pytest-cov==6.0.0
+anyio==4.6.2
+ruff==0.7.4
+mypy==1.13.0

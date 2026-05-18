@@ -1,5 +1,4 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from anthropic import AsyncAnthropic
 from supabase import acreate_client, AsyncClient
 
 
@@ -17,6 +16,13 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:3000"
 
     model_chat: str = "claude-haiku-4-5-20251001"
+    # Auxiliary call sites — the persona YES/NO gate, conversation title
+    # generation, and rolling summarization. Held separate so a future
+    # model_chat upgrade doesn't silently make these cheap/frequent calls
+    # expensive. Defaults match model_chat; override in .env for A/B tests.
+    model_persona_gate: str = "claude-haiku-4-5-20251001"
+    model_title_gen: str = "claude-haiku-4-5-20251001"
+    model_summarize: str = "claude-haiku-4-5-20251001"
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
@@ -43,7 +49,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 _supabase_client: AsyncClient | None = None
 

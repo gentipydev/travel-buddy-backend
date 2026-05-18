@@ -37,9 +37,10 @@ PLACES: list[dict] = [
             "across the river, linked by the Gorica Bridge (1780). Notable monuments "
             "include the Lead Mosque, the King's Mosque (15th century), the "
             "Bachelors' Mosque, and the Holy Trinity Church inside the castle. Berat "
-            "is roughly 2 hours by car south of Tirana and is often combined with "
-            "the Berat Wine Route or the Osum Canyon. Best visited in spring or "
-            "autumn; summers regularly exceed 35°C."
+            "is roughly 2 hours by car south of Tirana. Nearby half-day add-ons "
+            "within the Berat region include the Berat Wine Route and the Osum "
+            "Canyon. Best visited in spring or autumn; summers regularly exceed "
+            "35°C."
         ),
     },
     {
@@ -66,8 +67,7 @@ PLACES: list[dict] = [
             "Kadare and former dictator Enver Hoxha. Nearby attractions include "
             "the Blue Eye spring (Syri i Kaltër, about 18 km away) and the "
             "Antigonea archaeological park. Gjirokastër lies on the SH4 highway, "
-            "around 35 km from the Greek border crossing at Kakavija, and is "
-            "commonly paired with Sarandë and Butrint on a southern circuit."
+            "around 35 km from the Greek border crossing at Kakavija."
         ),
     },
     {
@@ -183,9 +183,9 @@ PLACES: list[dict] = [
             "among the best handicraft markets in Albania. Other sights include "
             "the Ethnographic Museum housed in an 18th-century Ottoman mansion "
             "and the Sari Salltik teqe of the Bektashi order on the cliff above "
-            "the town. Krujë is an easy half-day trip from Tirana International "
-            "Airport (about 15 km away) and is often paired with Tirana on a "
-            "one-day itinerary."
+            "the town. Krujë is reachable from Tirana International Airport "
+            "(about 15 km away); the town is small enough to cover in a "
+            "half-day visit."
         ),
     },
     {

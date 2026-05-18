@@ -1,4 +1,4 @@
-"""Unit tests for app.services.static_map.
+"""Unit tests for app.integrations.static_maps.
 
 Pure URL construction — no DB, no HTTP. The downsampler and the URL signer
 are the load-bearing details; the markers/polylines paths are exercised
@@ -6,7 +6,7 @@ incidentally so the regression net is wide.
 """
 from urllib.parse import unquote
 
-from app.services.static_map import (
+from app.integrations.static_maps import (
     _label_for_anchor,
     build_static_map_url,
     decode_polyline,

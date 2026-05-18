@@ -2,10 +2,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
 
 from app.config import get_supabase, settings
 from app.db.engine import init_db
-from app.logging_config import request_logging_middleware, setup_logging
+from app.observability import request_logging_middleware, setup_logging
+from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, conversations, health, images, preferences, trips, users
 
 
@@ -23,6 +25,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Travel Buddy API", lifespan=lifespan)
+
+# Attach the rate limiter so the @limiter.limit decorators on individual
+# routes can find it via request.app.state.limiter. The 429 response
+# shape and Retry-After header are owned by our handler, not SlowAPI's
+# default (the chat client parses both).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Order matters: middleware registered later wraps the handler innermost,
 # so register CORS first (innermost — closest to the route), then the

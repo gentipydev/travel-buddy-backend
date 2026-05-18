@@ -1,0 +1,1 @@
+Summarize this travel conversation history concisely, preserving key places, preferences and decisions mentioned.

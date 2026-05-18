@@ -20,9 +20,7 @@ from app.schemas import (
     TripStopUpdate,
     TripUpdate,
 )
-from app.services.trips_service import (
-    _load_trip,
-    _serialize,
+from app.domain.trips import (
     apply_add_day,
     apply_delete_day,
     apply_delete_stop,
@@ -34,6 +32,7 @@ from app.services.trips_service import (
     replace_trip_from_payload,
     serialize_trip,
 )
+from app.domain.trips.repository import _load_trip, _serialize
 
 # TODO(tests): pytest scaffolding deferred to a follow-up PR — see
 # manual curl smoke test recipes in the trip editing plan.

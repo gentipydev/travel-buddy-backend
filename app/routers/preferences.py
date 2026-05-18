@@ -5,23 +5,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import client, settings
+from app.config import settings
+from app.llm import client
 from app.db.engine import get_session
 from app.db.models import User, UserPreferences
 from app.deps import require_local_user
+from app.prompts import get as _get_prompt
 from app.schemas import UpdatePreferencesRequest
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
-PERSONA_SYSTEM_PROMPT = (
-    "You generate concise travel persona summaries for a travel assistant app. "
-    "Output exactly 2-3 sentences in second person (\"You are...\"). "
-    "Be specific and useful for personalizing travel recommendations. "
-    "Describe default tendencies, not rigid rules — the user may deviate "
-    "per trip. No preamble, no bullet points, no lists."
-)
+# Sourced from app/prompts/persona/system.md via the registry.
+PERSONA_SYSTEM_PROMPT = _get_prompt("persona.system").text
 
 
 @router.post("")

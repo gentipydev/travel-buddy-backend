@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.trips.geo import is_in_albania
+
 
 StopKind = Literal[
     "sight", "beach", "hike", "meal", "stay", "transport", "activity"
@@ -55,6 +57,21 @@ class TripStopCreate(BaseModel):
     lat: float | None = None
     lng: float | None = None
     google_place_id: str | None = None
+
+    @model_validator(mode="after")
+    def _coords_in_albania(self):
+        # Defense-in-depth against the model emitting raw US coords for a
+        # confusable place name. Strip rather than reject — the name/city
+        # are still usable and the enrichment pipeline can re-resolve.
+        if self.lat is not None and self.lng is not None:
+            if not is_in_albania(self.lat, self.lng):
+                self.lat = None
+                self.lng = None
+        elif (self.lat is None) != (self.lng is None):
+            # Half-coords are useless; drop both.
+            self.lat = None
+            self.lng = None
+        return self
 
 
 class TripDayCreate(BaseModel):
@@ -156,6 +173,17 @@ class TripStopUpdate(BaseModel):
             if key in data and data[key] is None:
                 raise ValueError(f"{key} cannot be cleared")
         return data
+
+    @model_validator(mode="after")
+    def _coords_in_albania(self):
+        if self.lat is not None and self.lng is not None:
+            if not is_in_albania(self.lat, self.lng):
+                self.lat = None
+                self.lng = None
+        elif (self.lat is None) != (self.lng is None):
+            self.lat = None
+            self.lng = None
+        return self
 
 
 class TripStopCreateBody(TripStopCreate):

@@ -1,0 +1,43 @@
+# Tooling config only — runtime deps still live in requirements*.txt so the
+# existing pip-based install path doesn't change. ruff and mypy both read
+# this file by default.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["__pycache__", ".venv", "build", "supabase/migrations"]
+
+[tool.ruff.lint]
+# Conservative starting ruleset:
+#   E, W — pycodestyle errors + warnings
+#   F    — pyflakes (unused imports, undefined names — the real bug-finders)
+#   I    — isort (import ordering — auto-fixable, low noise)
+#   B    — flake8-bugbear (catches a class of subtle bugs like mutable defaults)
+#   UP   — pyupgrade (`Optional[X]` → `X | None`, etc.)
+# Tighten incrementally; do not bulk-add rule families.
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # line-too-long handled informally; reformatter would churn the diff.
+    "B008",  # FastAPI uses Depends() in default args — idiomatic, not a bug.
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.mypy]
+python_version = "3.12"
+# Permissive baseline so the first PR after CI lands isn't red. Ratchet
+# rules on individually as call sites get typed.
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_redundant_casts = true
+warn_unused_ignores = true
+# Off for now:
+#   disallow_untyped_defs, disallow_any_generics, strict_equality,
+#   disallow_incomplete_defs — turn on per-module once that module is clean.
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Tests construct fake objects loosely; strict typing would just create
+# casts that obscure what's being tested. Loose by design.
+ignore_errors = true
