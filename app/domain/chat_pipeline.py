@@ -12,6 +12,7 @@ and get prompt-caching for the stable prefix.
 """
 import json
 import logging
+import time
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from app.domain.trips.repository import (
     get_or_create_refine_conversation,
     serialize_trip_for_context,
 )
+from app.observability import trace_var
 from app.prompts import build_system_payload
 from app.rag.place_detection import detect_place, to_card_dict
 from app.rag.retrieval import retrieve_chunks

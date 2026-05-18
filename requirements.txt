@@ -16,3 +16,9 @@ langchain-text-splitters==0.3.2
 langgraph==0.2.35
 alembic==1.13.3
 python-multipart==0.0.12
+# Braintrust observability — optional at runtime (no-op when
+# BRAINTRUST_ENABLED=false), but installed so enabling is a flag flip
+# not a redeploy. Loose-pinned until first prod install; hard-pin via
+# `pip freeze` after the integration ships.
+braintrust>=0.0.200
+autoevals>=0.0.130

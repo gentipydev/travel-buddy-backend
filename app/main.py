@@ -6,7 +6,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import get_supabase, settings
 from app.db.engine import init_db
-from app.observability import request_logging_middleware, setup_logging
+from app.observability import bt_init, request_logging_middleware, setup_logging
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, conversations, health, images, preferences, trips, users
 
@@ -19,6 +19,7 @@ setup_logging(level=settings.log_level, fmt=settings.log_format)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    bt_init()  # no-op when BRAINTRUST_ENABLED=false; safe to always call
     await init_db()
     await get_supabase()  # warm the async Storage client
     yield
