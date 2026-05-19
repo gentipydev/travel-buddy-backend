@@ -1,7 +1,7 @@
 """Anthropic refine-tool registry.
 
-`REFINE_TOOLS` is the list passed to `client.beta.messages.stream(...,
-tools=...)` on refine turns. Order is only for prompt clarity; Anthropic
+`REFINE_TOOLS` is the list passed to
+`client.beta.prompt_caching.messages.stream(..., tools=...)` on refine turns. Order is only for prompt clarity; Anthropic
 doesn't care about the position of a tool within the list.
 
 `REFINE_TOOL_NAMES` is the set the chat router checks when filtering

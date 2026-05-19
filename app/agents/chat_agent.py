@@ -35,7 +35,6 @@ from app.domain.conversations import (
 from app.domain.trips.mutations import replace_trip_from_payload
 from app.domain.trips.repository import serialize_trip
 from app.llm import (
-    PROMPT_CACHING_BETA,
     assemble_chat_system,
     client,
     encode_sse_text,
@@ -116,8 +115,8 @@ class ChatAgent:
         tool_calls_for_span: list[str] = []
         # `chat_span` no-ops to a stand-in span when BRAINTRUST_ENABLED is
         # false — the same `span.log(...)` calls below work unchanged.
-        # When enabled, every `client.beta.messages.stream(...)` inside
-        # the block auto-emits a child span via `wrap_anthropic` at the
+        # When enabled, every `client.beta.prompt_caching.messages.stream(...)`
+        # inside the block auto-emits a child span via `wrap_anthropic` at the
         # client level, so the parent only logs request-scope context.
         with chat_span(name="chat_stream") as span:
             span.log(
@@ -166,7 +165,10 @@ class ChatAgent:
                 # Prompt caching: the system payload is a 2-block list with the
                 # ~3-4k-token stable prefix marked as a cache breakpoint and the
                 # refine addendum + RAG context appended as an uncached suffix.
-                # Beta endpoint is required in anthropic==0.39.0; cache token
+                # In anthropic==0.39.0 the streaming entrypoint for prompt
+                # caching lives at `client.beta.prompt_caching.messages.stream`;
+                # the `anthropic-beta: prompt-caching-2024-07-31` header is
+                # injected by the SDK so we don't pass it ourselves. Cache token
                 # accounting (`cache_creation_input_tokens` /
                 # `cache_read_input_tokens`) ships back on `response.usage`.
                 system_payload = assemble_chat_system(
@@ -179,7 +181,7 @@ class ChatAgent:
                 # mid-stream exceptions fall through to the outer except and
                 # the partial duration is captured there.
                 _anthropic_start = time.perf_counter()
-                async with client.beta.messages.stream(
+                async with client.beta.prompt_caching.messages.stream(
                     model=settings.model_chat,
                     # 8192 fits ~12-day itineraries with 6 stops/day plus the
                     # intro/outro paragraph. The previous 2048 cap was hitting
@@ -195,7 +197,6 @@ class ChatAgent:
                     system=system_payload,
                     messages=ctx.messages,
                     tools=available_tools,
-                    betas=[PROMPT_CACHING_BETA],
                 ) as response:
                     async for text in response.text_stream:
                         yield encode_sse_text(text)

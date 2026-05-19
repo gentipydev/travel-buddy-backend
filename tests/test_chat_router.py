@@ -12,9 +12,9 @@ Mocking strategy
   chat router to return a hand-built `ChatTurnContext`, skipping every
   DB / RAG / Cohere call.
 - `client` is monkey-patched on the chat_agent module so
-  `client.beta.messages.stream(...)` returns a fake async context
-  manager that yields chosen text chunks via `text_stream` and a chosen
-  final message via `get_final_message()`.
+  `client.beta.prompt_caching.messages.stream(...)` returns a fake async
+  context manager that yields chosen text chunks via `text_stream` and a
+  chosen final message via `get_final_message()`.
 - FastAPI dependency overrides bypass `get_optional_user` and
   `get_session` so no real auth/DB session is needed.
 
@@ -95,7 +95,7 @@ def _final_message(
 
 
 class _FakeStreamResponse:
-    """Quacks like `client.beta.messages.stream(...)`'s yielded response."""
+    """Quacks like `client.beta.prompt_caching.messages.stream(...)`'s yielded response."""
 
     def __init__(self, text_chunks: list[str], final_message: Any):
         self._chunks = text_chunks
@@ -128,13 +128,17 @@ class _FakeStreamCM:
 
 def _fake_client(text_chunks: list[str], final_message: Any) -> SimpleNamespace:
     """Build a `client`-shaped namespace whose
-    `client.beta.messages.stream(...)` returns our fake CM."""
+    `client.beta.prompt_caching.messages.stream(...)` returns our fake CM."""
 
     def _stream(*_args, **_kwargs):
         return _FakeStreamCM(_FakeStreamResponse(text_chunks, final_message))
 
     return SimpleNamespace(
-        beta=SimpleNamespace(messages=SimpleNamespace(stream=_stream))
+        beta=SimpleNamespace(
+            prompt_caching=SimpleNamespace(
+                messages=SimpleNamespace(stream=_stream),
+            ),
+        ),
     )
 
 
@@ -392,7 +396,11 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_anon):
         raise RuntimeError("anthropic exploded")
 
     fake = SimpleNamespace(
-        beta=SimpleNamespace(messages=SimpleNamespace(stream=_explode))
+        beta=SimpleNamespace(
+            prompt_caching=SimpleNamespace(
+                messages=SimpleNamespace(stream=_explode),
+            ),
+        ),
     )
     monkeypatch.setattr(chat_agent_module, "client", fake)
 

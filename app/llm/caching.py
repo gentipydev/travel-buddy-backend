@@ -12,9 +12,9 @@ Refine turns carry a large but per-turn-volatile `trip_json`; we cache
 only the prefix and leave `trip_json` uncached.
 
 `assemble_chat_system` returns a `list[dict]` compatible with the
-Anthropic SDK's `BetaTextBlockParam`. The chat agent passes it as
-`system=` to `client.beta.messages.stream(...)` together with
-`betas=[PROMPT_CACHING_BETA]`.
+Anthropic SDK's `PromptCachingBetaTextBlockParam`. The chat agent passes
+it as `system=` to `client.beta.prompt_caching.messages.stream(...)`; the
+SDK injects the `anthropic-beta: prompt-caching-2024-07-31` header.
 """
 from typing import Literal, TypedDict
 
