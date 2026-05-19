@@ -1,25 +1,15 @@
 import logging
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-
-logger = logging.getLogger(__name__)
 
 from app.db.engine import get_session
 from app.db.models import Trip, TripDay, TripStop, User
 from app.deps import require_local_user
-from app.schemas import (
-    StopReorderBody,
-    TripCreate,
-    TripDayCreateBody,
-    TripOut,
-    TripStopCreateBody,
-    TripStopUpdate,
-    TripUpdate,
-)
 from app.domain.trips import (
     apply_add_day,
     apply_delete_day,
@@ -33,6 +23,33 @@ from app.domain.trips import (
     serialize_trip,
 )
 from app.domain.trips.repository import _load_trip, _serialize
+from app.schemas import (
+    PaginatedResponse,
+    StopReorderBody,
+    TripCreate,
+    TripDayCreateBody,
+    TripOut,
+    TripStopCreateBody,
+    TripStopUpdate,
+    TripUpdate,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
+    """Split a `"{updated_at_iso}|{uuid}"` cursor into its two parts.
+
+    Keyset pagination needs both halves: `updated_at` alone collides under
+    same-second updates; `id` alone breaks the visible ordering. The pair
+    is opaque to the client — we don't promise the format won't change."""
+    try:
+        ts_str, id_str = cursor.split("|", 1)
+        return datetime.fromisoformat(ts_str), UUID(id_str)
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"invalid cursor: {exc}"
+        ) from exc
 
 # TODO(tests): pytest scaffolding deferred to a follow-up PR — see
 # manual curl smoke test recipes in the trip editing plan.
@@ -122,25 +139,62 @@ async def create_trip(
         raise HTTPException(
             status_code=500,
             detail=f"create_trip failed: {type(exc).__name__}: {exc}",
-        )
+        ) from exc
 
 
-@router.get("", response_model=list[TripOut])
+@router.get(
+    "",
+    response_model=PaginatedResponse[TripOut],
+    responses={
+        400: {"description": "Invalid cursor format"},
+        422: {"description": "limit out of range (must be 1..100)"},
+    },
+)
 async def list_trips(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
+    limit: int = Query(20, ge=1, le=100),
+    cursor: str | None = Query(
+        None,
+        description=(
+            "Opaque cursor from a previous response's `next_cursor`. "
+            "Omit for the first page."
+        ),
+    ),
 ):
-    result = await db.execute(
+    """Keyset-paginated list of the caller's trips, newest first.
+
+    Ordering is `(updated_at DESC, id DESC)` so a same-second-updated tie
+    still has a deterministic page boundary. Fetches `limit + 1` rows and
+    derives `next_cursor` from the (limit+1)th — when fewer than that come
+    back, `next_cursor` is None and the caller has the last page.
+    """
+    stmt = (
         select(Trip)
         .where(Trip.user_id == user.id)
         .options(
             selectinload(Trip.days).selectinload(TripDay.stops),
             selectinload(Trip.routes),
         )
-        .order_by(Trip.updated_at.desc())
+        .order_by(Trip.updated_at.desc(), Trip.id.desc())
     )
-    trips = result.unique().scalars().all()
-    return [_serialize(t) for t in trips]
+    if cursor:
+        ts, last_id = _parse_cursor(cursor)
+        # Row-constructor comparison: PostgreSQL evaluates this lexicographically,
+        # so a row "ties" on updated_at only if its id also breaks the comparison
+        # the same way — no rows skipped at second-boundaries, no rows repeated.
+        stmt = stmt.where(
+            tuple_(Trip.updated_at, Trip.id) < tuple_(ts, last_id)
+        )
+    rows = (await db.execute(stmt.limit(limit + 1))).unique().scalars().all()
+    next_cursor: str | None = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = f"{last.updated_at.isoformat()}|{last.id}"
+    return PaginatedResponse[TripOut](
+        items=[_serialize(t) for t in rows], next_cursor=next_cursor,
+    )
 
 
 @router.get("/{trip_id}", response_model=TripOut)

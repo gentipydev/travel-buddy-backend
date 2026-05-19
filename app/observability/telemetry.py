@@ -6,9 +6,11 @@ inside `log_trace` must never propagate to the request path.
 """
 import json
 import logging
+import time
 import uuid
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ def new_request_id() -> str:
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass
@@ -52,6 +54,27 @@ class RequestTrace:
     # Cache hit rate = cache_read / (cache_read + cache_creation + input).
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    # Per-stage elapsed seconds, populated by `stage()` (this class) or the
+    # module-level `stage()` helper in `app/observability/__init__.py`.
+    # Repeated stage names sum (e.g. two RAG calls in one turn). Nested
+    # stages overlap — `context_assembly` includes `rag_*` time; dashboards
+    # subtract if they need disjoint buckets.
+    stage_latencies: dict[str, float] = field(default_factory=dict)
+    # USD derived from token counts × per-model rates in
+    # `app/observability/pricing.py`. 0.0 when the model is missing from
+    # the pricing table — telemetry must never crash on an unknown SKU.
+    estimated_cost_usd: float = 0.0
+
+    @contextmanager
+    def stage(self, name: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start
+            self.stage_latencies[name] = (
+                self.stage_latencies.get(name, 0.0) + elapsed
+            )
 
 
 def log_trace(trace: RequestTrace) -> None:

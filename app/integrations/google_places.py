@@ -26,8 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import Place, PlaceCache
-from app.domain.trips.geo import is_in_albania
 from app.integrations._retry import http_get_with_retry
+
+
+def _is_in_albania(lat: float, lng: float) -> bool:
+    # Lazy import to break the circular dep:
+    # `app.domain.trips.__init__` eagerly imports `enrichment`, which imports
+    # back from this module. A module-level `from app.domain.trips.geo import …`
+    # evaluates the package init and trips the cycle (visible once the test
+    # files actually run, post the conftest anyio-mark fix).
+    from app.domain.trips.geo import is_in_albania
+
+    return is_in_albania(lat, lng)
 
 
 logger = logging.getLogger(__name__)
@@ -225,7 +235,7 @@ async def _fetch_and_cache(
         # unusable row — return None and let the next call retry.
         return None
 
-    if not is_in_albania(lat, lng):
+    if not _is_in_albania(lat, lng):
         # Refuse to seed the cache with a non-AL row — once cached, a future
         # caller hitting the same Claude-generated place_id would still pull
         # the wrong country. Returning None drops the stop's enrichment.
@@ -456,7 +466,7 @@ async def find_place_id_by_name(
         _log_textsearch_done(query, "no_results", started)
         return None
 
-    if not is_in_albania(lat, lng):
+    if not _is_in_albania(lat, lng):
         # Hard guard against the unbounded-text-search failure: refuse to
         # return coords / place_id outside the Albania bbox. The caller
         # leaves the stop un-geo'd, which is correct fail-safe behavior.

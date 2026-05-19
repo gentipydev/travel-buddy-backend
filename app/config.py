@@ -8,6 +8,17 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     cohere_api_key: str | None = None
 
+    # Braintrust observability — LLM trace logging + scorer evals.
+    # No-op when `braintrust_api_key` is empty or `braintrust_enabled` is
+    # False (the default), so local dev / CI / PRs without the secret run
+    # unchanged. `braintrust_log_user_payloads` is a privacy kill switch:
+    # when False, request.message + assistant_text are stripped from
+    # spans; token counts and structural metadata still ship.
+    braintrust_api_key: str | None = None
+    braintrust_project: str = "travel-buddy"
+    braintrust_enabled: bool = False
+    braintrust_log_user_payloads: bool = True
+
     supabase_url: str
     supabase_anon_key: str
     supabase_service_key: str
@@ -42,6 +53,15 @@ class Settings(BaseSettings):
     # set `LOG_FORMAT=text` locally for human-friendly output.
     log_level: str = "INFO"
     log_format: str = "json"
+
+    # Sentry — empty string disables init (production no-op). When set, the
+    # SDK auto-instruments FastAPI request spans. `sentry_traces_sample_rate`
+    # is the perf-span sampler (0.1 = 10%); error events are always sent.
+    # The `_scrub_pii` hook in `app/main.py` strips chat content / persona
+    # / email / stop names before any event leaves the process.
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.1
+    sentry_environment: str = "development"
 
     @property
     def origins_list(self) -> list[str]:

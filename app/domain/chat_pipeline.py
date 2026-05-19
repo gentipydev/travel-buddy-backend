@@ -12,6 +12,7 @@ and get prompt-caching for the stable prefix.
 """
 import json
 import logging
+import time
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -29,11 +30,11 @@ from app.domain.trips.repository import (
     get_or_create_refine_conversation,
     serialize_trip_for_context,
 )
+from app.observability import trace_var
 from app.prompts import build_system_payload
 from app.rag.place_detection import detect_place, to_card_dict
 from app.rag.retrieval import retrieve_chunks
 from app.schemas import ChatRequest
-
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,11 @@ async def prepare_turn(
     fall back to client-supplied `conversation_history` and are never written
     to the conversations table.
     """
+    # Manual stage timer (not `with stage(...)`) so the 130-line function body
+    # doesn't need re-indenting. Recorded just before the return; HTTPException
+    # paths skip the recording but those requests fail before `log_trace`
+    # fires anyway, so the missing data is moot.
+    _ctx_start = time.perf_counter()
     preferences = None
     local_user: User | None = None
     if supa_user:
@@ -198,6 +204,13 @@ async def prepare_turn(
 
     place = await detect_place(request.message, db)
     card_payload = json.dumps(to_card_dict(place)) if place else None
+
+    trace = trace_var.get()
+    if trace is not None:
+        trace.stage_latencies["context_assembly"] = (
+            trace.stage_latencies.get("context_assembly", 0.0)
+            + time.perf_counter() - _ctx_start
+        )
 
     return ChatTurnContext(
         cached_prefix=cached_prefix,

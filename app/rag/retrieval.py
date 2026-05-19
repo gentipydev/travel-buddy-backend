@@ -14,9 +14,9 @@ import re
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chunk
+from app.observability import stage
 from app.rag.embedding import search_chunks
 from app.rag.reranking import rerank_chunks
-
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +56,14 @@ async def retrieve_chunks(
     rerank relevance score, surfaced for telemetry."""
     if not needs_retrieval(query):
         return [], None
-    candidates = await search_chunks(query, db, conversation_history=history)
+    with stage("rag_retrieval"):
+        candidates = await search_chunks(
+            query, db, conversation_history=history
+        )
     if not candidates:
         return [], None
-    return await rerank_chunks(query, candidates)
+    with stage("rag_rerank"):
+        return await rerank_chunks(query, candidates)
 
 
 async def retrieve_context(
