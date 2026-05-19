@@ -27,7 +27,11 @@ _SUMMARIZE_TRIGGER = 20
 _SUMMARIZE_BATCH = 15
 _HISTORY_TAIL = 10
 
-_MAX_CONVERSATIONS_PER_USER = 50
+# Product rule: each user keeps at most this many non-trip chats. Older
+# ones are evicted on creation of a new chat (see get_or_create_conversation).
+# Trip-linked "Refine with Buddy" chats are exempt — they're 1:1 with a
+# saved trip and outlive this cap.
+_MAX_CONVERSATIONS_PER_USER = 3
 
 
 async def get_or_create_conversation(
@@ -62,7 +66,7 @@ async def get_or_create_conversation(
     # Refine-with-Buddy conversations are coupled 1:1 to a saved trip; aging
     # one out would silently delete chat history the user expected to find
     # next time they tap "Refine with Buddy" on that trip. Exempt them from
-    # the cap — both for counting and for selecting the eviction target.
+    # the cap — both for counting and for selecting eviction targets.
     count_result = await db.execute(
         select(func.count()).where(
             Conversation.user_id == user_id,
@@ -70,20 +74,25 @@ async def get_or_create_conversation(
         )
     )
     count = count_result.scalar_one()
-    if count >= _MAX_CONVERSATIONS_PER_USER:
-        oldest_result = await db.execute(
-            select(Conversation.id)
-            .where(
-                Conversation.user_id == user_id,
-                Conversation.trip_id.is_(None),
-            )
-            .order_by(Conversation.created_at.asc())
-            .limit(1)
-        )
-        oldest_id = oldest_result.scalar_one_or_none()
-        if oldest_id is not None:
+    # We're about to add one row. Trim enough oldest non-trip rows so the
+    # post-insert count is ≤ cap. For legacy users above the cap this can
+    # delete more than one row in a single bulk DELETE.
+    to_evict = count - _MAX_CONVERSATIONS_PER_USER + 1
+    if to_evict > 0:
+        oldest_ids = (
             await db.execute(
-                delete(Conversation).where(Conversation.id == oldest_id)
+                select(Conversation.id)
+                .where(
+                    Conversation.user_id == user_id,
+                    Conversation.trip_id.is_(None),
+                )
+                .order_by(Conversation.created_at.asc())
+                .limit(to_evict)
+            )
+        ).scalars().all()
+        if oldest_ids:
+            await db.execute(
+                delete(Conversation).where(Conversation.id.in_(oldest_ids))
             )
 
     conv = Conversation(
