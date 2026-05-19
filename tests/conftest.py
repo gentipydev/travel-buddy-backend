@@ -19,10 +19,12 @@ Requires `pytest` and `pytest-asyncio` (configured via pytest.ini's
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.sql.expression import Select
 
 
 # anyio's pytest plugin (already a transitive dep via httpx/FastAPI) runs
@@ -96,8 +98,15 @@ class FakeSession:
 
     async def execute(self, stmt: Any) -> FakeResult:
         self.executed.append(stmt)
-        value = self._next_results.pop(0) if self._next_results else None
-        return FakeResult(value)
+        # Only consume queued results for SELECT statements. DML
+        # (UPDATE / INSERT / DELETE) returns an empty result and leaves
+        # the queue untouched so a sequence like
+        # `_load_trip → _touch_trip → _load_trip` only needs the trip
+        # queued twice rather than once + a placeholder for the UPDATE.
+        if isinstance(stmt, Select):
+            value = self._next_results.pop(0) if self._next_results else None
+            return FakeResult(value)
+        return FakeResult(None)
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -113,6 +122,19 @@ class FakeSession:
 
     async def rollback(self) -> None:
         self.rolled_back += 1
+
+    async def refresh(self, obj: Any) -> None:
+        # No-op stand-in for AsyncSession.refresh — the in-memory object is
+        # already the canonical state in this fake.
+        pass
+
+    async def scalar(self, stmt: Any) -> Any:
+        # Convenience equivalent to `(await execute(stmt)).scalar_one_or_none()`
+        # — what `AsyncSession.scalar` does. Used by handlers that don't
+        # need the full Result wrapper. Queue value behaves the same as for
+        # other SELECT helpers.
+        result = await self.execute(stmt)
+        return result.scalar_one_or_none()
 
 
 @pytest.fixture
@@ -162,8 +184,9 @@ def mock_http(monkeypatch) -> MockTransportRegistry:
     def factory():
         return httpx.AsyncClient(transport=httpx.MockTransport(registry))
 
-    from app.integrations import _retry, google_directions, google_places
     from tenacity import wait_none
+
+    from app.integrations import _retry, google_directions, google_places
 
     monkeypatch.setattr(google_places, "_http_client", factory)
     monkeypatch.setattr(google_directions, "_http_client", factory)

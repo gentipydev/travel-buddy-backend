@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"
 
+    # Sentry — empty string disables init (production no-op). When set, the
+    # SDK auto-instruments FastAPI request spans. `sentry_traces_sample_rate`
+    # is the perf-span sampler (0.1 = 10%); error events are always sent.
+    # The `_scrub_pii` hook in `app/main.py` strips chat content / persona
+    # / email / stop names before any event leaves the process.
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.1
+    sentry_environment: str = "development"
+
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",")]

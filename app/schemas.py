@@ -1,10 +1,23 @@
 from datetime import date
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.trips.geo import is_in_albania
+
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Keyset pagination envelope for unbounded list endpoints.
+
+    `next_cursor` is opaque to the client — encoding is owned by each
+    endpoint (today: `"{updated_at_iso}|{row_id}"` for /trips and
+    /conversations). When None, the caller has reached the last page.
+    """
+    items: list[T]
+    next_cursor: str | None = None
 
 
 StopKind = Literal[

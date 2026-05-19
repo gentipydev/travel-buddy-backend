@@ -18,11 +18,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import DirectionsCache
-from app.domain.trips.geo import haversine_km
 from app.integrations._retry import http_get_with_retry
 
 
 logger = logging.getLogger(__name__)
+
+
+def _haversine_km(*args: float) -> float:
+    # Lazy import to break the circular dep with `app.domain.trips` (whose
+    # package init eagerly imports `enrichment`, which imports back from this
+    # module). Same pattern as `_is_in_albania` in google_places.py.
+    from app.domain.trips.geo import haversine_km
+
+    return haversine_km(*args)
 
 
 _DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
@@ -114,10 +122,10 @@ async def get_route(
         return None
     (snap_from_lat, snap_from_lng), (snap_to_lat, snap_to_lng) = snapped
     from_drift_m = (
-        haversine_km(from_lat, from_lng, snap_from_lat, snap_from_lng) * 1000.0
+        _haversine_km(from_lat, from_lng, snap_from_lat, snap_from_lng) * 1000.0
     )
     to_drift_m = (
-        haversine_km(to_lat, to_lng, snap_to_lat, snap_to_lng) * 1000.0
+        _haversine_km(to_lat, to_lng, snap_to_lat, snap_to_lng) * 1000.0
     )
     if from_drift_m > _MAX_SNAP_METERS or to_drift_m > _MAX_SNAP_METERS:
         _log_done(key, "missing_snap_too_far", started)

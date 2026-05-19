@@ -70,7 +70,9 @@ jobs:
         run: mypy app
 
       - name: Pytest
-        # --cov-fail-under is intentionally 0 for the first green build —
-        # bump to the observed coverage minus a small margin after the
-        # first run lands so this becomes a ratchet, not a tripwire.
-        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=0
+        # Ratcheted floor: observed coverage was 63% after docs/07 item 5
+        # landed (mutators, agent, chat_pipeline, dispatcher tests). 58%
+        # gives a 5% safety margin against transient ordering / flake. Bump
+        # whenever a future item lifts coverage durably; never drop without
+        # a written reason in the commit message.
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=58

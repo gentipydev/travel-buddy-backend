@@ -7,14 +7,24 @@ from slowapi.errors import RateLimitExceeded
 from app.config import get_supabase, settings
 from app.db.engine import init_db
 from app.observability import bt_init, request_logging_middleware, setup_logging
+from app.observability.sentry import init_sentry
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, conversations, health, images, preferences, trips, users
-
 
 # Configure logging BEFORE FastAPI is built so uvicorn's own loggers attach
 # to the same handler/format. JSON in prod (Render filters per-field on JSON);
 # `LOG_FORMAT=text` in `.env` switches to a human-readable format locally.
 setup_logging(level=settings.log_level, fmt=settings.log_format)
+
+# Sentry MUST init before the FastAPI app is constructed so the integration
+# can wrap the framework's startup. No-op when SENTRY_DSN is unset (the
+# common case for local dev / CI). The `_scrub_pii` before_send hook
+# strips chat content / persona / emails before any event is sent.
+init_sentry(
+    dsn=settings.sentry_dsn,
+    environment=settings.sentry_environment,
+    traces_sample_rate=settings.sentry_traces_sample_rate,
+)
 
 
 @asynccontextmanager
@@ -41,8 +51,16 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["*"],
+    # PATCH is the most-used mutation verb in trips router (apply_*_stop /
+    # apply_*_day endpoints at app/routers/trips.py:179,263,296) and PUT is
+    # used by the full-trip replace path at line 320; both were silently
+    # missing before docs/07 item 6. OPTIONS is the CORS preflight verb
+    # browsers send before non-simple requests — without it, any cross-origin
+    # PATCH/PUT/DELETE fails the preflight before the real request is sent.
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    # Tighter than `["*"]`: explicit allow-list trims the surface to what
+    # the Flutter client actually sends. Add new headers here as needed.
+    allow_headers=["Authorization", "Content-Type"],
 )
 app.middleware("http")(request_logging_middleware)
 

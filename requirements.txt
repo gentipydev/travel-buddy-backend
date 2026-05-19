@@ -22,3 +22,7 @@ python-multipart==0.0.12
 # `pip freeze` after the integration ships.
 braintrust>=0.0.200
 autoevals>=0.0.130
+# Sentry — production error visibility. Init is a no-op when SENTRY_DSN
+# is empty so local dev / CI runs unchanged. The fastapi extra pulls the
+# integration that auto-instruments request spans.
+sentry-sdk[fastapi]>=2.18.0
