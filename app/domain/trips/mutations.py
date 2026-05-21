@@ -168,6 +168,32 @@ async def apply_add_day(
     return refreshed
 
 
+async def apply_update_day(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    day_id: UUID,
+    payload: dict,
+) -> Trip:
+    """Patch a day's metadata (title / base_city). `payload` is
+    `TripDayUpdate.model_dump(exclude_unset=True)` — only set keys are
+    written. day_number is NOT patchable here (renumbering days in place
+    would silently break UI labels and stop time anchors). Use add+delete
+    if you really need a different number."""
+    day = await _load_day(db, trip_id, day_id, user_id)
+    if day is None:
+        raise HTTPException(status_code=404, detail="Day not found")
+    for key, value in payload.items():
+        setattr(day, key, value)
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after update_day")
+    return refreshed
+
+
 async def apply_delete_day(
     db: AsyncSession,
     *,
@@ -348,4 +374,97 @@ async def apply_reorder_stops(
     refreshed = await _load_trip(db, trip_id, user_id)
     if refreshed is None:
         raise HTTPException(status_code=500, detail="Trip vanished after reorder")
+    return refreshed
+
+
+async def apply_move_stop(
+    db: AsyncSession,
+    *,
+    trip_id: UUID,
+    user_id: int,
+    stop_id: UUID,
+    payload: dict,
+) -> Trip:
+    """Move a stop to a different day within the same trip. `payload` matches
+    `StopMoveBody.model_dump()`: `target_day_id` (required), optional
+    `sort_order` for target position (omit or pass beyond target length to
+    append).
+
+    Unlike `apply_delete_stop`, the source day's `sort_order` values ARE
+    compacted — move is a rearrange, not a deletion. The target day shifts
+    existing stops at >= `sort_order` up by one to make room. All stop
+    fields (id, arrival_time, end_time, duration_minutes, completed_at,
+    enrichment, etc.) survive the move; only `trip_day_id` and `sort_order`
+    change. Same-day moves are rejected with 400 — use reorder instead.
+    """
+    stop = await _load_stop(db, trip_id, stop_id, user_id)
+    if stop is None:
+        raise HTTPException(status_code=404, detail="Stop not found")
+    try:
+        target_day_id = UUID(str(payload["target_day_id"]))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail="target_day_id is required"
+        ) from exc
+    target_day = await _load_day(db, trip_id, target_day_id, user_id)
+    if target_day is None:
+        raise HTTPException(status_code=404, detail="Target day not found")
+    if stop.trip_day_id == target_day.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Stop is already on the target day; use reorder",
+        )
+
+    source_day_id = stop.trip_day_id
+    old_sort = stop.sort_order
+    target_len = len(target_day.stops)
+    requested = payload.get("sort_order")
+    if requested is None:
+        new_sort = target_len
+    else:
+        requested_int = int(requested)
+        if requested_int < 0:
+            raise HTTPException(
+                status_code=400, detail="sort_order must be >= 0"
+            )
+        new_sort = min(requested_int, target_len)
+
+    # Three-phase update to dodge UNIQUE(trip_day_id, sort_order) collisions
+    # while the moved stop, the source compaction, and the target shift are
+    # all in flight. Same trick as `apply_reorder_stops` — shift the moved
+    # stop into a disjoint negative range first, then rearrange the two days
+    # in their now-collision-free positive ranges.
+    SHIFT = 1_000_000
+    await db.execute(
+        update(TripStop)
+        .where(TripStop.id == stop.id)
+        .values(sort_order=TripStop.sort_order - SHIFT)
+    )
+    await db.execute(
+        update(TripStop)
+        .where(
+            TripStop.trip_day_id == source_day_id,
+            TripStop.sort_order > old_sort,
+        )
+        .values(sort_order=TripStop.sort_order - 1)
+    )
+    if new_sort < target_len:
+        await db.execute(
+            update(TripStop)
+            .where(
+                TripStop.trip_day_id == target_day.id,
+                TripStop.sort_order >= new_sort,
+            )
+            .values(sort_order=TripStop.sort_order + 1)
+        )
+    await db.execute(
+        update(TripStop)
+        .where(TripStop.id == stop.id)
+        .values(trip_day_id=target_day.id, sort_order=new_sort)
+    )
+    await _touch_trip(db, trip_id)
+    await db.flush()
+    refreshed = await _load_trip(db, trip_id, user_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Trip vanished after move_stop")
     return refreshed

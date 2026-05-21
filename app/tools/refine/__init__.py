@@ -15,7 +15,9 @@ from app.tools.refine.delete_day import DELETE_DAY_TOOL
 from app.tools.refine.delete_stop import DELETE_STOP_TOOL
 from app.tools.refine.dispatcher import apply_refine_tool
 from app.tools.refine.insert_stop import INSERT_STOP_TOOL
+from app.tools.refine.move_stop import MOVE_STOP_TOOL
 from app.tools.refine.reorder_stops import REORDER_STOPS_TOOL
+from app.tools.refine.update_day import UPDATE_DAY_TOOL
 from app.tools.refine.update_stop import UPDATE_STOP_TOOL
 from app.tools.refine.update_trip import UPDATE_TRIP_TOOL
 
@@ -26,8 +28,10 @@ REFINE_TOOLS = [
     INSERT_STOP_TOOL,
     DELETE_STOP_TOOL,
     REORDER_STOPS_TOOL,
+    MOVE_STOP_TOOL,
     ADD_DAY_TOOL,
     DELETE_DAY_TOOL,
+    UPDATE_DAY_TOOL,
     UPDATE_TRIP_TOOL,
 ]
 
@@ -40,9 +44,11 @@ __all__ = [
     "DELETE_DAY_TOOL",
     "DELETE_STOP_TOOL",
     "INSERT_STOP_TOOL",
+    "MOVE_STOP_TOOL",
     "REFINE_TOOLS",
     "REFINE_TOOL_NAMES",
     "REORDER_STOPS_TOOL",
+    "UPDATE_DAY_TOOL",
     "UPDATE_STOP_TOOL",
     "UPDATE_TRIP_TOOL",
     "apply_refine_tool",

@@ -45,8 +45,10 @@ def _patch_all_mutators(monkeypatch) -> dict[str, AsyncMock]:
             "apply_insert_stop",
             "apply_delete_stop",
             "apply_reorder_stops",
+            "apply_move_stop",
             "apply_add_day",
             "apply_delete_day",
+            "apply_update_day",
             "apply_update_trip",
         )
     }
@@ -137,6 +139,30 @@ async def test_reorder_stops_dispatches_to_apply_reorder_stops(
     assert len(kwargs["payload"]["order"]) == 2
 
 
+async def test_move_stop_dispatches_to_apply_move_stop(monkeypatch, fake_db):
+    """`move_stop` strips the stop_id from raw_input, validates the rest as
+    StopMoveBody (target_day_id + optional sort_order), and forwards as a
+    JSON-mode dump so UUIDs land as strings the mutator can parse."""
+    mocks = _patch_all_mutators(monkeypatch)
+    target_day = uuid4()
+    await apply_refine_tool(
+        fake_db,
+        trip_id=_TRIP_ID,
+        user_id=_USER_ID,
+        name="move_stop",
+        raw_input={
+            "stop_id": str(_STOP_ID),
+            "target_day_id": str(target_day),
+            "sort_order": 2,
+        },
+    )
+    mocks["apply_move_stop"].assert_called_once()
+    _, kwargs = mocks["apply_move_stop"].call_args
+    assert kwargs["stop_id"] == _STOP_ID
+    assert kwargs["payload"]["target_day_id"] == str(target_day)
+    assert kwargs["payload"]["sort_order"] == 2
+
+
 async def test_add_day_dispatches_to_apply_add_day(monkeypatch, fake_db):
     mocks = _patch_all_mutators(monkeypatch)
     await apply_refine_tool(
@@ -163,6 +189,27 @@ async def test_delete_day_dispatches_to_apply_delete_day(monkeypatch, fake_db):
     mocks["apply_delete_day"].assert_called_once_with(
         fake_db, trip_id=_TRIP_ID, user_id=_USER_ID, day_id=_DAY_ID
     )
+
+
+async def test_update_day_dispatches_to_apply_update_day(monkeypatch, fake_db):
+    """update_day strips day_id and validates the remainder as TripDayUpdate
+    so a `null` clears the column and an absent key leaves it untouched."""
+    mocks = _patch_all_mutators(monkeypatch)
+    await apply_refine_tool(
+        fake_db,
+        trip_id=_TRIP_ID,
+        user_id=_USER_ID,
+        name="update_day",
+        raw_input={
+            "day_id": str(_DAY_ID),
+            "title": "Berat day",
+            "base_city": None,
+        },
+    )
+    mocks["apply_update_day"].assert_called_once()
+    _, kwargs = mocks["apply_update_day"].call_args
+    assert kwargs["day_id"] == _DAY_ID
+    assert kwargs["payload"] == {"title": "Berat day", "base_city": None}
 
 
 async def test_update_trip_dispatches_to_apply_update_trip(monkeypatch, fake_db):

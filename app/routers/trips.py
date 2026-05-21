@@ -3,7 +3,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,7 +15,9 @@ from app.domain.trips import (
     apply_delete_day,
     apply_delete_stop,
     apply_insert_stop,
+    apply_move_stop,
     apply_reorder_stops,
+    apply_update_day,
     apply_update_stop,
     apply_update_trip,
     get_or_create_refine_conversation,
@@ -25,9 +27,11 @@ from app.domain.trips import (
 from app.domain.trips.repository import _load_trip, _serialize
 from app.schemas import (
     PaginatedResponse,
+    StopMoveBody,
     StopReorderBody,
     TripCreate,
     TripDayCreateBody,
+    TripDayUpdate,
     TripOut,
     TripStopCreateBody,
     TripStopUpdate,
@@ -56,6 +60,12 @@ def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
+# Free-tier cap. Enforced here as the source of truth; the mobile client mirrors
+# the same check for pre-flight UX and to avoid the network round-trip, but a
+# forked/old client landing here without that guard still gets a 409 with the
+# stable `trip_limit_reached` detail token.
+MAX_TRIPS_PER_USER = 3
+
 
 @router.post("", response_model=TripOut, status_code=status.HTTP_201_CREATED)
 async def create_trip(
@@ -73,6 +83,14 @@ async def create_trip(
     # plain-text "Internal Server Error". Full traceback still lands in
     # server logs via logger.exception.
     try:
+        existing_count = await db.scalar(
+            select(func.count(Trip.id)).where(Trip.user_id == user.id)
+        )
+        if (existing_count or 0) >= MAX_TRIPS_PER_USER:
+            raise HTTPException(
+                status_code=409,
+                detail="trip_limit_reached",
+            )
         trip = Trip(
             user_id=user.id,
             title=payload.title,
@@ -277,6 +295,27 @@ async def add_day(
     return await serialize_trip(db, updated)
 
 
+@router.patch("/{trip_id}/days/{day_id}", response_model=TripOut)
+async def update_day(
+    trip_id: UUID,
+    day_id: UUID,
+    payload: TripDayUpdate,
+    user: User = Depends(require_local_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Patch a day's metadata (title / base_city). day_number is intentionally
+    NOT in the patch surface — see `TripDayUpdate` docstring."""
+    updated = await apply_update_day(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        day_id=day_id,
+        payload=payload.model_dump(exclude_unset=True),
+    )
+    await db.commit()
+    return await serialize_trip(db, updated)
+
+
 @router.delete("/{trip_id}/days/{day_id}", response_model=TripOut)
 async def delete_day(
     trip_id: UUID,
@@ -366,6 +405,29 @@ async def reorder_stops(
         # accidentally null them on the server (per-item arrival_time etc.
         # are only written when the caller explicitly included them).
         payload=payload.model_dump(mode="json", exclude_unset=True),
+    )
+    await db.commit()
+    return await serialize_trip(db, updated)
+
+
+@router.patch("/{trip_id}/stops/{stop_id}/move", response_model=TripOut)
+async def move_stop(
+    trip_id: UUID,
+    stop_id: UUID,
+    payload: StopMoveBody,
+    user: User = Depends(require_local_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Move a stop to a different day within the same trip, preserving
+    `stop.id`, times, completed_at, and enrichment. The source day's
+    sort_orders are compacted; the target shifts to make room when an
+    explicit position is provided."""
+    updated = await apply_move_stop(
+        db,
+        trip_id=trip_id,
+        user_id=user.id,
+        stop_id=stop_id,
+        payload=payload.model_dump(mode="json"),
     )
     await db.commit()
     return await serialize_trip(db, updated)

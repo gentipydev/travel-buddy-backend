@@ -27,13 +27,17 @@ from app.domain.trips.mutations import (
     apply_delete_day,
     apply_delete_stop,
     apply_insert_stop,
+    apply_move_stop,
     apply_reorder_stops,
+    apply_update_day,
     apply_update_stop,
     apply_update_trip,
 )
 from app.schemas import (
+    StopMoveBody,
     StopReorderBody,
     TripDayCreateBody,
+    TripDayUpdate,
     TripStopCreateBody,
     TripStopUpdate,
     TripUpdate,
@@ -96,6 +100,18 @@ async def apply_refine_tool(
             day_id=day_id,
             payload=body.model_dump(mode="json", exclude_unset=True),
         )
+    if name == "move_stop":
+        stop_id = UUID(str(raw_input["stop_id"]))
+        body = StopMoveBody.model_validate(
+            {k: v for k, v in raw_input.items() if k != "stop_id"}
+        )
+        return await apply_move_stop(
+            db,
+            trip_id=trip_id,
+            user_id=user_id,
+            stop_id=stop_id,
+            payload=body.model_dump(mode="json"),
+        )
     if name == "add_day":
         body = TripDayCreateBody.model_validate(raw_input)
         return await apply_add_day(
@@ -108,6 +124,18 @@ async def apply_refine_tool(
         day_id = UUID(str(raw_input["day_id"]))
         return await apply_delete_day(
             db, trip_id=trip_id, user_id=user_id, day_id=day_id
+        )
+    if name == "update_day":
+        day_id = UUID(str(raw_input["day_id"]))
+        body = TripDayUpdate.model_validate(
+            {k: v for k, v in raw_input.items() if k != "day_id"}
+        )
+        return await apply_update_day(
+            db,
+            trip_id=trip_id,
+            user_id=user_id,
+            day_id=day_id,
+            payload=body.model_dump(exclude_unset=True),
         )
     if name == "update_trip":
         body = TripUpdate.model_validate(raw_input)

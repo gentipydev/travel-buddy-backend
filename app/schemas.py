@@ -213,6 +213,20 @@ class TripStopCreateBody(TripStopCreate):
     sort_order: int | None = Field(default=None, ge=0)
 
 
+class TripDayUpdate(BaseModel):
+    """PATCH /trips/{id}/days/{did} body. Patches day-level metadata
+    (title, base_city). `day_number` is intentionally NOT here — renumber
+    days via delete + add, not in place, because day_number drives the
+    UI's "Day N" labels and reorder is a separate UX problem.
+
+    `exclude_unset` semantics: present keys with null clear the column;
+    absent keys leave it untouched. Mirrors TripStopUpdate's optional
+    null-allowing semantics for free-text fields."""
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, max_length=200)
+    base_city: str | None = Field(default=None, max_length=200)
+
+
 class TripDayCreateBody(BaseModel):
     """POST /trips/{id}/days body. day_number is required; the client picks
     it (so renumbering is the client's responsibility, and bugs are loud).
@@ -247,6 +261,16 @@ class StopReorderBody(BaseModel):
     new ordering so the server can validate the set matches what's on disk."""
     model_config = ConfigDict(extra="forbid")
     order: list[StopReorderItem] = Field(min_length=1)
+
+
+class StopMoveBody(BaseModel):
+    """PATCH /trips/{id}/stops/{sid}/move body. Moves a stop to a different
+    day within the same trip. `sort_order` omitted (or beyond target length)
+    appends; otherwise existing target-day stops shift up to make room.
+    Same-day moves are rejected — use reorder instead."""
+    model_config = ConfigDict(extra="forbid")
+    target_day_id: UUID
+    sort_order: int | None = Field(default=None, ge=0)
 
 
 class UpdatePreferencesRequest(BaseModel):

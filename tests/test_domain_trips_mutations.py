@@ -24,7 +24,9 @@ from app.domain.trips.mutations import (
     apply_delete_day,
     apply_delete_stop,
     apply_insert_stop,
+    apply_move_stop,
     apply_reorder_stops,
+    apply_update_day,
     apply_update_stop,
     apply_update_trip,
     replace_trip_from_payload,
@@ -216,6 +218,48 @@ async def test_apply_add_day_rejects_duplicate_day_number(fake_db):
 # ---------------------------------------------------------------------------
 # apply_delete_day
 # ---------------------------------------------------------------------------
+
+
+async def test_apply_update_day_patches_set_keys_only(fake_db):
+    """exclude_unset upstream — absent keys leave the day's field untouched.
+    Mirrors apply_update_stop's setattr loop."""
+    day = _make_day(day_number=2)
+    day.title = "Drive to Berat"
+    day.base_city = "Berat"
+    refreshed = _make_trip()
+    fake_db.queue(day)
+    fake_db.queue(refreshed)
+    await apply_update_day(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, day_id=day.id,
+        payload={"title": "Berat Castle day"},  # base_city omitted
+    )
+    assert day.title == "Berat Castle day"
+    assert day.base_city == "Berat"  # untouched
+
+
+async def test_apply_update_day_clears_field_when_null_passed(fake_db):
+    """Passing null clears the column (different from absent). Mirrors the
+    `exclude_unset` semantics on the dispatcher side."""
+    day = _make_day(day_number=1)
+    day.base_city = "Tirana"
+    refreshed = _make_trip()
+    fake_db.queue(day)
+    fake_db.queue(refreshed)
+    await apply_update_day(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, day_id=day.id,
+        payload={"base_city": None},
+    )
+    assert day.base_city is None
+
+
+async def test_apply_update_day_404_when_day_missing(fake_db):
+    fake_db.queue(None)
+    with pytest.raises(HTTPException) as exc:
+        await apply_update_day(
+            fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID,
+            day_id=uuid.uuid4(), payload={"title": "x"},
+        )
+    assert exc.value.status_code == 404
 
 
 async def test_apply_delete_day_deletes_target_day(fake_db):
@@ -455,3 +499,117 @@ async def test_apply_reorder_stops_404_when_day_missing(fake_db):
             day_id=uuid.uuid4(), payload={"order": []},
         )
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# apply_move_stop
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_move_stop_uses_updates_not_delete_and_create(fake_db):
+    """Cross-day move must preserve stop.id by UPDATEing trip_day_id +
+    sort_order — no row is deleted, no new row inserted. This is the
+    critical contract: completed_at, enrichment, and any reference to the
+    stop survive the move."""
+    source_day_id = uuid.uuid4()
+    target_day = _make_day(day_id=uuid.uuid4(), day_number=2, stops=[])
+    stop = _make_stop(sort_order=0)
+    stop.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(stop)        # _load_stop
+    fake_db.queue(target_day)  # _load_day(target)
+    fake_db.queue(refreshed)   # _load_trip refresh
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+        payload={"target_day_id": str(target_day.id)},
+    )
+    assert fake_db.deleted == []
+    assert [o for o in fake_db.added if isinstance(o, TripStop)] == []
+
+
+async def test_apply_move_stop_appends_when_no_sort_order(fake_db):
+    """`sort_order` omitted → moved stop lands at end of target. Target has
+    no stops, so the target-shift UPDATE is skipped: stop-shift to negative
+    range, source compaction, reattach, _touch_trip = 4 UPDATEs."""
+    source_day_id = uuid.uuid4()
+    target_day = _make_day(day_id=uuid.uuid4(), stops=[])
+    stop = _make_stop(sort_order=2)
+    stop.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(stop)
+    fake_db.queue(target_day)
+    fake_db.queue(refreshed)
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+        payload={"target_day_id": str(target_day.id)},
+    )
+    # 7 executes: _load_stop (S) + _load_day (S) + 4 UPDATEs + _load_trip
+    # (S). Empty target skips the phase-2b shift UPDATE.
+    assert len(fake_db.executed) == 7
+
+
+async def test_apply_move_stop_shifts_target_when_inserting_mid_position(fake_db):
+    """Inserting at sort_order=0 on a non-empty target adds the phase-2b
+    shift UPDATE on top of the append count."""
+    source_day_id = uuid.uuid4()
+    target_stop = _make_stop(sort_order=0)
+    target_day = _make_day(day_id=uuid.uuid4(), stops=[target_stop])
+    stop = _make_stop(sort_order=0)
+    stop.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(stop)
+    fake_db.queue(target_day)
+    fake_db.queue(refreshed)
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+        payload={
+            "target_day_id": str(target_day.id),
+            "sort_order": 0,
+        },
+    )
+    # 8 executes: prior 7 + the phase-2b shift UPDATE that frees position 0.
+    assert len(fake_db.executed) == 8
+
+
+async def test_apply_move_stop_rejects_same_day_move(fake_db):
+    """Source == target makes no sense — caller should use reorder instead.
+    400 is explicit so a buggy caller producing same-day moves fails loud."""
+    stop = _make_stop(sort_order=0)
+    day = _make_day(day_id=uuid.uuid4(), stops=[stop])
+    stop.trip_day_id = day.id
+    fake_db.queue(stop)
+    fake_db.queue(day)
+    with pytest.raises(HTTPException) as exc:
+        await apply_move_stop(
+            fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+            payload={"target_day_id": str(day.id)},
+        )
+    assert exc.value.status_code == 400
+    assert "reorder" in exc.value.detail
+
+
+async def test_apply_move_stop_404_when_stop_missing(fake_db):
+    fake_db.queue(None)
+    with pytest.raises(HTTPException) as exc:
+        await apply_move_stop(
+            fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID,
+            stop_id=uuid.uuid4(),
+            payload={"target_day_id": str(uuid.uuid4())},
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_apply_move_stop_404_when_target_day_missing(fake_db):
+    """Auth gate via _load_day catches a target_day_id from a different
+    trip the same way it catches a non-existent day."""
+    stop = _make_stop(sort_order=0)
+    stop.trip_day_id = uuid.uuid4()
+    fake_db.queue(stop)
+    fake_db.queue(None)  # target day not loadable for this user+trip
+    with pytest.raises(HTTPException) as exc:
+        await apply_move_stop(
+            fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+            payload={"target_day_id": str(uuid.uuid4())},
+        )
+    assert exc.value.status_code == 404
+    assert "Target day" in exc.value.detail

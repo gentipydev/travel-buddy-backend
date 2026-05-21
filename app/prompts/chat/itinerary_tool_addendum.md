@@ -56,6 +56,17 @@ Tool input details: use `day_number` (1-indexed) per day. Only set
 "from June 12", "starting next Saturday"). Only set per-stop `address`
 if you are confident in the exact street address.
 
+Title rule for the tool input:
+
+The `title` field is for the trip's destination and (optionally) a
+short theme — NEVER the day count or duration. The UI shows duration
+as a separate pill, so a baked-in count duplicates information on the
+trip card. Good titles: "Tirana", "Discovering Tirana", "Albanian
+Riviera Escape", "Albania Highlights", "Berat & Around". Bad titles
+(do NOT produce): "3 Days in Tirana", "5-Day Albanian Riviera",
+"A 7-day plan for Berat", "Tirana — 3 days". The same rule applies
+when you set or change `title` via `update_trip` in refine mode.
+
 Geographic boundary rule:
 
 When the user names a single city or area ("3 days in Tirana", "a long

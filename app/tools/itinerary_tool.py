@@ -43,7 +43,17 @@ ITINERARY_TOOL = {
         "type": "object",
         "required": ["title", "days"],
         "properties": {
-            "title": {"type": "string"},
+            "title": {
+                "type": "string",
+                "description": (
+                    "Destination-focused title for the trip card "
+                    "(e.g. 'Tirana', 'Discovering Tirana', "
+                    "'Albanian Riviera Escape'). Do NOT bake in the "
+                    "day count or duration — the UI shows it as a "
+                    "separate pill, so a prefix like '3 Days in …' "
+                    "duplicates information."
+                ),
+            },
             "summary": {"type": "string"},
             "start_date": {
                 "type": "string",
