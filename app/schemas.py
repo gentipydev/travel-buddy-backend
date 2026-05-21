@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
@@ -112,6 +112,9 @@ class TripStopOut(TripStopCreate):
     photos: list[str] = Field(default_factory=list)
     rating: float | None = None
     formatted_address: str | None = None
+    # Set when the mobile auto-detector or manual override marks the stop
+    # visited. NULL until then. Pre-015 rows are NULL.
+    completed_at: datetime | None = None
 
 
 class TripDayOut(TripDayCreate):
@@ -176,6 +179,10 @@ class TripStopUpdate(BaseModel):
     lat: float | None = None
     lng: float | None = None
     google_place_id: str | None = None
+    # Mobile sends either a UTC ISO timestamp (mark visited) or null (reset).
+    # The mutation dispatcher (apply_update_stop) sets the column directly via
+    # setattr; no extra plumbing needed.
+    completed_at: datetime | None = None
 
     @model_validator(mode="before")
     @classmethod

@@ -16,8 +16,11 @@ This document describes what Travel Buddy collects, where it lives, who it's sha
 | Trips | Itineraries: title, summary, dates, days, stops (name / coords / notes), routes | Created via the Buddy "save trip" action or direct trip-editor edits | No — voluntary |
 | Uploaded photos | JPG / PNG / WebP attached in the Buddy chat | Uploaded directly from device via `supabase_flutter`'s Storage client to bucket `chat-attachments/<auth_uid>/<uuid>.<ext>` | No — voluntary |
 | Saved conversations | Hydrated message thread per `conversations` row | Persisted server-side on `[DONE]` of each turn | Yes when chat is used (so we can resume) |
+| Stop visit timestamps | `completed_at` ISO datetime on a trip stop | Mobile auto-detector (foreground location + scheduled-time match) or manual "Mark as visited" from the rail-node popover | No — voluntary; auto-detection requires opt-in + OS location permission |
 
-We do **not** collect: phone numbers, payment data, contacts, calendars, precise device location (we use city-level location only via Google Places lookups against text we already have).
+**Precise device location** is read only on-device by the Flutter mobile client, only while the app is in the foreground, and only when the user has opted in for a specific trip during its calendar window. The raw coordinates are **never transmitted off-device** — the only value that ever leaves the phone is the `completed_at` timestamp produced when a stop matches the time-and-distance criteria. We do NOT request `ACCESS_BACKGROUND_LOCATION` (Android) or "Always" location (iOS); background geofencing is explicitly out of scope.
+
+We do **not** collect: phone numbers, payment data, contacts, calendars, or any device location beyond the foreground use described above.
 
 ## 2. Where it lives
 

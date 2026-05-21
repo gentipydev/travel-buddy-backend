@@ -320,6 +320,41 @@ async def test_apply_update_stop_404_when_stop_missing(fake_db):
     assert exc.value.status_code == 404
 
 
+async def test_apply_update_stop_sets_completed_at(fake_db):
+    """Mobile mark-visited path: PATCH carries `completed_at` (UTC datetime);
+    setattr loop writes it without touching other fields."""
+    stop = _make_stop(name="Skanderbeg Square", kind="sight")
+    stop.city = "Tirana"
+    stop.completed_at = None
+    refreshed = _make_trip()
+    fake_db.queue(stop)
+    fake_db.queue(refreshed)
+    visited_at = datetime.now(UTC)
+    await apply_update_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+        payload={"completed_at": visited_at},
+    )
+    assert stop.completed_at == visited_at
+    assert stop.name == "Skanderbeg Square"  # untouched
+    assert stop.city == "Tirana"  # untouched
+
+
+async def test_apply_update_stop_resets_completed_at_to_null(fake_db):
+    """Manual override "Reset to upcoming": PATCH sends completed_at=None;
+    setattr writes NULL. Other fields untouched."""
+    stop = _make_stop(name="Et'hem Bey Mosque", kind="sight")
+    stop.completed_at = datetime.now(UTC)
+    refreshed = _make_trip()
+    fake_db.queue(stop)
+    fake_db.queue(refreshed)
+    await apply_update_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=stop.id,
+        payload={"completed_at": None},
+    )
+    assert stop.completed_at is None
+    assert stop.name == "Et'hem Bey Mosque"  # untouched
+
+
 # ---------------------------------------------------------------------------
 # apply_delete_stop
 # ---------------------------------------------------------------------------

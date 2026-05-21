@@ -65,6 +65,10 @@ def _serialize(trip: Trip) -> dict:
                         "photos": list(stop.photos or []),
                         "rating": stop.rating,
                         "formatted_address": stop.formatted_address,
+                        "completed_at": (
+                            stop.completed_at.isoformat()
+                            if stop.completed_at else None
+                        ),
                     }
                     for stop in day.stops
                 ],

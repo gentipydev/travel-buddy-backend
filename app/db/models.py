@@ -287,6 +287,7 @@ class TripStop(Base):
     photos = Column(JSONB, nullable=False, server_default="[]")
     rating = Column(Float, nullable=True)
     formatted_address = Column(Text, nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
     day = relationship("TripDay", back_populates="stops")
 
