@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime
 from typing import Generic, Literal, TypeVar
 from uuid import UUID
@@ -5,6 +6,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.trips.geo import is_in_albania
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -76,12 +79,22 @@ class TripStopCreate(BaseModel):
         # Defense-in-depth against the model emitting raw US coords for a
         # confusable place name. Strip rather than reject — the name/city
         # are still usable and the enrichment pipeline can re-resolve.
+        # Log on strip so the rate of misfires is observable in production
+        # (a sudden spike usually means a prompt regression).
         if self.lat is not None and self.lng is not None:
             if not is_in_albania(self.lat, self.lng):
+                logger.info(
+                    "geo.coords_stripped name=%r city=%r lat=%s lng=%s",
+                    self.name, self.city, self.lat, self.lng,
+                )
                 self.lat = None
                 self.lng = None
         elif (self.lat is None) != (self.lng is None):
             # Half-coords are useless; drop both.
+            logger.info(
+                "geo.half_coords_stripped name=%r lat=%s lng=%s",
+                self.name, self.lat, self.lng,
+            )
             self.lat = None
             self.lng = None
         return self
@@ -198,9 +211,17 @@ class TripStopUpdate(BaseModel):
     def _coords_in_albania(self):
         if self.lat is not None and self.lng is not None:
             if not is_in_albania(self.lat, self.lng):
+                logger.info(
+                    "geo.coords_stripped src=update name=%r city=%r lat=%s lng=%s",
+                    self.name, self.city, self.lat, self.lng,
+                )
                 self.lat = None
                 self.lng = None
         elif (self.lat is None) != (self.lng is None):
+            logger.info(
+                "geo.half_coords_stripped src=update name=%r lat=%s lng=%s",
+                self.name, self.lat, self.lng,
+            )
             self.lat = None
             self.lng = None
         return self

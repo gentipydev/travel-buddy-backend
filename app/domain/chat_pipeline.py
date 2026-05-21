@@ -30,6 +30,7 @@ from app.domain.trips.repository import (
     get_or_create_refine_conversation,
     serialize_trip_for_context,
 )
+from app.llm.token_budget import enforce_budget
 from app.observability import trace_var
 from app.prompts import build_system_payload
 from app.rag.place_detection import detect_place, to_card_dict
@@ -201,6 +202,20 @@ async def prepare_turn(
         user_payload = request.message
 
     messages = history + [{"role": "user", "content": user_payload}]
+
+    # Defense-in-depth token budget. The cached prefix is the
+    # prompt-cache breakpoint (never trim it), user messages are the
+    # request (never trim them); only the RAG block inside the volatile
+    # suffix is safe to shrink. Today the chunks table is curated and
+    # the partial-trim path rarely fires, but a future ingestion path
+    # could produce oversized RAG chunks that bust the model's input
+    # window. The function logs a structured `token_budget.truncated`
+    # line at INFO when trimming fires — that's the recalibration
+    # signal (compare to Anthropic's reported `input_tokens` in the
+    # RequestTrace). See `app/llm/token_budget.py`.
+    cached_prefix, volatile_suffix, messages, _budget_report = enforce_budget(
+        cached_prefix, volatile_suffix, messages,
+    )
 
     place = await detect_place(request.message, db)
     card_payload = json.dumps(to_card_dict(place)) if place else None

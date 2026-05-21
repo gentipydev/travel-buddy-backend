@@ -1,7 +1,7 @@
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,7 @@ from app.db.engine import get_session
 from app.db.models import User, UserPreferences
 from app.deps import require_local_user
 from app.prompts import get as _get_prompt
+from app.rate_limit import limiter, user_or_ip_key
 from app.schemas import UpdatePreferencesRequest
 
 logger = logging.getLogger(__name__)
@@ -86,10 +87,18 @@ async def get_my_preferences(
 
 
 @router.post("/persona")
+@limiter.limit("10/hour", key_func=user_or_ip_key)
 async def generate_persona(
+    request: Request,
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
+    # Per-user 10/hour ceiling. The endpoint makes a non-cached Claude
+    # call (~300 input + 512 output tokens on Haiku) and is normally hit
+    # 0-2× per session, so the ceiling is hard to reach legitimately;
+    # the limit catches a misbehaving client or a credentials leak before
+    # it racks up serious cost. `Request` is in the signature because
+    # SlowAPI's decorator inspects it for the rate-limit key.
     result = await db.execute(
         select(UserPreferences).where(UserPreferences.user_id == user.id)
     )

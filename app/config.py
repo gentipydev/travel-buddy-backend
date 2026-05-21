@@ -67,6 +67,23 @@ class Settings(BaseSettings):
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",")]
 
+    def validate_required_keys(self) -> list[str]:
+        # Pydantic already rejects literally-missing required fields, but an
+        # empty string passes its `str` check and then fails at first use
+        # (e.g. anthropic_api_key="" → 401 on the first stream). Listing the
+        # truthy-required keys here fails fast in `lifespan` instead, with all
+        # missing keys reported at once for a faster ops loop.
+        missing = [
+            key for key in (
+                "anthropic_api_key",
+                "supabase_url",
+                "supabase_anon_key",
+                "supabase_service_key",
+                "database_url",
+            ) if not getattr(self, key)
+        ]
+        return missing
+
 
 settings = Settings()
 

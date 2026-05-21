@@ -1,0 +1,66 @@
+{
+  "_description": "Multi-day request that triggers the emit_itinerary tool call. Exercises the validation + SSE emission branch of ChatAgent.stream(). Stops are pinned in Albania so the geo validator passes.",
+  "deltas": [
+    "Here's a 2-day plan starting from Tirana.",
+    " Day 1 heads south along the coast;",
+    " Day 2 winds through the inland villages.",
+    " I've kept the driving under 2 hours per day so you have time to stop."
+  ],
+  "tool_uses": [
+    {
+      "name": "emit_itinerary",
+      "input": {
+        "title": "Tirana to the south coast, 2 days",
+        "summary": "Coastal day in Vlorë followed by inland villages.",
+        "start_date": null,
+        "days": [
+          {
+            "day_number": 1,
+            "title": "Tirana to Vlorë",
+            "base_city": "Vlorë",
+            "stops": [
+              {
+                "name": "Skanderbeg Square",
+                "kind": "sight",
+                "city": "Tirana",
+                "duration_minutes": 60,
+                "lat": 41.3275,
+                "lng": 19.8189
+              },
+              {
+                "name": "Vlorë waterfront",
+                "kind": "sight",
+                "city": "Vlorë",
+                "duration_minutes": 120,
+                "lat": 40.4686,
+                "lng": 19.4904
+              }
+            ]
+          },
+          {
+            "day_number": 2,
+            "title": "Inland villages",
+            "base_city": "Berat",
+            "stops": [
+              {
+                "name": "Berat old town",
+                "kind": "sight",
+                "city": "Berat",
+                "duration_minutes": 180,
+                "lat": 40.7058,
+                "lng": 19.9522
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "input_tokens": 1380,
+    "output_tokens": 220,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 3120
+  },
+  "stop_reason": "tool_use"
+}

@@ -24,6 +24,7 @@ works, then real Anthropic calls can drop in.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,8 @@ from app.evals import (
     persona_gate,
     refine_fidelity,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -66,45 +69,109 @@ def _load_jsonl(name: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------- #
 
 
+async def _parse_sse_itinerary_event(stream_iter) -> dict[str, Any]:
+    """Pull the `event: itinerary` payload out of a /chat/stream SSE response.
+
+    The chat agent emits one `event: itinerary` (or `event: itinerary_invalid`)
+    per turn, followed by `data: <JSON>`. We accumulate raw bytes, split on
+    blank-line frame boundaries, and return the first matching JSON dict.
+    Returns an empty dict when the stream ends with no itinerary event
+    (which is the correct signal for a non-multi-day prompt).
+    """
+    buf = b""
+    found: dict[str, Any] = {}
+    async for chunk in stream_iter:
+        buf += chunk
+        while b"\n\n" in buf:
+            frame, buf = buf.split(b"\n\n", 1)
+            text = frame.decode("utf-8", errors="replace")
+            event_line = ""
+            data_lines: list[str] = []
+            for line in text.split("\n"):
+                if line.startswith("event:"):
+                    event_line = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+            if event_line == "itinerary" and data_lines:
+                try:
+                    found = json.loads("\n".join(data_lines))
+                except json.JSONDecodeError:
+                    found = {}
+                return found
+    return found
+
+
 async def itinerary_task(input: dict[str, Any]) -> dict[str, Any]:
     """Run one /chat/stream turn and return the emitted itinerary payload.
 
-    TODO: replace this stub with a real ASGI call. The shape:
-
-        from httpx import AsyncClient, ASGITransport
-        from app.main import app
-
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            async with client.stream("POST", "/chat/stream",
-                                     json={"message": input["message"]}) as r:
-                # parse SSE: capture `event: itinerary` payload
-                ...
-
-    Until that's wired, return an empty dict — every scorer will fail
-    deterministically, which is the right "not implemented" signal.
+    Hits the live Anthropic API via the in-process ASGI transport — no
+    network listener required. Anonymous chat is fine here; the fixture
+    inputs never name a real user, and the agent's behavior on anonymous
+    turns is what the scorers measure.
     """
-    return {}
+    # Lazy import so a runner without httpx/the app available can still
+    # import the module for `--help` etc.
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    message = input.get("message", "")
+    if not message:
+        return {}
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        timeout=120.0,
+    ) as client:
+        async with client.stream(
+            "POST", "/chat/stream", json={"message": message}
+        ) as response:
+            if response.status_code != 200:
+                logger.warning(
+                    "itinerary_task: /chat/stream returned %d for message=%r",
+                    response.status_code, message,
+                )
+                return {}
+            return await _parse_sse_itinerary_event(response.aiter_bytes())
 
 
-def refine_task(input: dict[str, Any]) -> dict[str, Any]:
+async def refine_task(input: dict[str, Any]) -> dict[str, Any]:
     """Run a refine turn and return the post-refine trip JSON.
 
-    TODO: same as itinerary_task — needs the ASGI client + a way to
-    seed the saved_trip referenced by `input["saved_trip_id"]`.
+    Stub: refine requires an authenticated user with a saved trip whose
+    UUIDs match the fixture's expected_touched_stop_ids. Wiring this
+    needs:
+      (a) a test-only Supabase JWT issuer or a `Depends` override
+      (b) a DB-seeding helper that creates the saved_trip fixture under a
+          known user
+      (c) capturing `event: trip_refined` from the SSE stream (mirroring
+          `_parse_sse_itinerary_event` for the new event name)
+    Each piece is small; the combination is enough lift to warrant its
+    own PR. Until then, every refine_fidelity score will be 0.0 — the
+    correct "not implemented" signal.
     """
     return {}
 
 
-def persona_gate_task(input: dict[str, Any]) -> str:
+async def persona_gate_task(input: dict[str, Any]) -> str:
     """Run the live persona gate and return its YES / NO decision.
 
-    TODO: import and call `_should_refresh_persona` from
-    `app.domain.conversations.persona`. The function is async — wrap
-    appropriately when wiring up.
+    Calls `_should_refresh_persona` directly — same code path the
+    production `refresh_travel_persona` background task runs through.
+    The scorer compares the result against the fixture's ground-truth
+    `expected` field ("YES" / "NO").
     """
-    return "NO"
+    from app.domain.conversations.persona import _should_refresh_persona
+    from app.llm import client as llm_client
+
+    summary = input.get("summary", "")
+    current_persona = input.get("current_persona")
+    should = await _should_refresh_persona(
+        summary=summary,
+        current_persona=current_persona,
+        client=llm_client,
+    )
+    return "YES" if should else "NO"
 
 
 # ---------------------------------------------------------------------- #

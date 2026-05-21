@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,6 +9,7 @@ from app.config import get_supabase, settings
 from app.db.engine import init_db
 from app.observability import bt_init, request_logging_middleware, setup_logging
 from app.observability.sentry import init_sentry
+from app.prompts.registry import validate_prompt_hashes
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, conversations, health, images, preferences, trips, users
 
@@ -27,8 +29,27 @@ init_sentry(
 )
 
 
+_startup_logger = logging.getLogger("app.main.startup")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail fast on misconfiguration: Pydantic catches literally-missing
+    # required keys at module import, but a present-but-empty value passes
+    # its `str` check and only fails on first use. Listing all missing
+    # truthy-required keys here surfaces the full set at once for a faster
+    # ops loop. See `Settings.validate_required_keys` for the list.
+    missing = settings.validate_required_keys()
+    if missing:
+        raise RuntimeError(
+            f"startup.env_invalid missing_or_empty={missing}"
+        )
+    _startup_logger.info("startup.env_validated")
+    # Prompt content-hash self-check: recompute each prompt's hash from
+    # its loaded text and confirm it matches the registry's stored value.
+    # Surfaces (name, hash) pairs in logs so the eval harness can pin to
+    # them later. Raises if any prompt was constructed inconsistently.
+    validate_prompt_hashes()
     bt_init()  # no-op when BRAINTRUST_ENABLED=false; safe to always call
     await init_db()
     await get_supabase()  # warm the async Storage client

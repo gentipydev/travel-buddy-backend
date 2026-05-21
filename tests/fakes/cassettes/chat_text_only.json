@@ -1,0 +1,17 @@
+{
+  "_description": "Plain conversational turn: Claude answers in prose with no tool call. Used to test the text-streaming path through ChatAgent.stream() without exercising the itinerary/refine branches.",
+  "deltas": [
+    "Tap water in Berat is generally considered safe to drink",
+    ", though many locals and travellers still prefer bottled",
+    " water for taste. If you have a sensitive stomach,",
+    " stick to bottled — it's inexpensive and widely available."
+  ],
+  "tool_uses": [],
+  "usage": {
+    "input_tokens": 1240,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 3120
+  },
+  "stop_reason": "end_turn"
+}

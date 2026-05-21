@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,6 +25,7 @@ from app.domain.trips import (
     serialize_trip,
 )
 from app.domain.trips.repository import _load_trip, _serialize
+from app.rate_limit import limiter, user_or_ip_key
 from app.schemas import (
     PaginatedResponse,
     StopMoveBody,
@@ -434,7 +435,9 @@ async def move_stop(
 
 
 @router.put("/{trip_id}", response_model=TripOut)
+@limiter.limit("20/hour", key_func=user_or_ip_key)
 async def replace_trip(
+    request: Request,
     trip_id: UUID,
     payload: TripCreate,
     user: User = Depends(require_local_user),
@@ -444,7 +447,13 @@ async def replace_trip(
     so the Flutter `ItineraryDraft.toCreatePayload` is reusable. The trip's id,
     created_at, and any associated conversation are preserved; everything else
     is wiped and rebuilt. Stop ids change on every replace — the response is
-    the new source of truth."""
+    the new source of truth.
+
+    Per-user 20/hour ceiling: every replace rewrites the normalized
+    days/stops tables and fires the async enrichment chain (Google Places +
+    Directions + static map signing). The ceiling is loose enough that a
+    user actively iterating won't hit it but tight enough to bound damage
+    from a forked/old client thrashing the endpoint."""
     updated = await replace_trip_from_payload(
         db,
         trip_id=trip_id,

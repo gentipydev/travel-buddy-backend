@@ -142,6 +142,31 @@ def fake_db() -> FakeSession:
     return FakeSession()
 
 
+@pytest.fixture
+def fake_anthropic_stream(monkeypatch):
+    """Factory fixture: install a cassette-driven Anthropic stream.
+
+    Tests opt-in by calling `fake_anthropic_stream("chat_text_only")` (or
+    any cassette name under `tests/fakes/cassettes/`). After the call,
+    every `client.beta.prompt_caching.messages.stream(...)` invocation
+    inside the test returns a `FakeAnthropicStream` regardless of args —
+    so chat-agent tests can exercise the streaming, validation, and
+    SSE-emission paths without hitting Anthropic.
+
+    monkeypatch auto-rolls back after each test so cassettes don't leak.
+    """
+    from app import llm
+    from tests.fakes.fake_anthropic import make_stream
+
+    def _install(cassette_name: str):
+        factory = make_stream(cassette_name)
+        monkeypatch.setattr(
+            llm.client.beta.prompt_caching.messages, "stream", factory
+        )
+
+    return _install
+
+
 class MockTransportRegistry:
     """Record HTTP responses keyed by URL prefix.
 

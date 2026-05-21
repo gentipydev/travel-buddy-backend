@@ -504,3 +504,107 @@ def test_chat_agent_init_backfills_ctx_fields_on_trace(fake_db):
     assert trace.chunks_returned == 3
     assert trace.top_rerank_score == 0.87
     assert trace.trip_refine is True
+
+
+# ---------------------------------------------------------------------------
+# Cassette-driven tests via `fake_anthropic_stream` fixture (conftest.py).
+#
+# These verify the same paths as the inline `_fake_client` tests above but
+# through the recorded-response cassette layer — the path the eval harness
+# will exercise too. Adding tests at this layer means a cassette schema
+# change is caught here before it shows up in evals/runners/braintrust_run.
+# ---------------------------------------------------------------------------
+
+
+async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
+    fake_anthropic_stream, monkeypatch, fake_db,
+):
+    """The `chat_text_only` cassette has no tool calls and ~3120 cached
+    input tokens. After the stream completes:
+    - text deltas should be emitted as `data:` frames (no event prefix)
+    - no itinerary or trip_refined event
+    - cache_read_input_tokens should land on the trace from `response.usage`
+    """
+    fake_anthropic_stream("chat_text_only")
+    # Persistence is out of scope for this test — stub the writer that
+    # would otherwise need a real conversation row.
+    monkeypatch.setattr(
+        chat_agent_module, "append_messages", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        chat_agent_module, "maybe_summarize", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        chat_agent_module, "generate_title", AsyncMock(return_value=None)
+    )
+
+    trace = _new_trace()
+    agent = ChatAgent(
+        db=fake_db,
+        request=ChatRequest(message="is tap water safe in Berat?"),
+        ctx=_ctx(),
+        user_id=None,
+        trace=trace,
+        started_at=0.0,
+    )
+    frames = await _drain(agent.stream())
+
+    events = _events(frames)
+    assert "itinerary" not in events
+    assert "trip_refined" not in events
+    # At least one default text frame landed.
+    assert "data" in events
+    # [DONE] is the terminator.
+    assert frames[-1] == "data: [DONE]\n\n"
+    # The cassette's usage block landed on the trace.
+    assert trace.cache_read_input_tokens == 3120
+    assert trace.input_tokens == 1240
+    assert trace.output_tokens == 64
+    # No itinerary emitted.
+    assert trace.itinerary_emitted is False
+
+
+async def test_chat_agent_emit_itinerary_cassette_emits_itinerary_event(
+    fake_anthropic_stream, monkeypatch, fake_db,
+):
+    """The `chat_emit_itinerary` cassette pairs prose deltas with a valid
+    `emit_itinerary` tool block (stops are in Albania so the geo validator
+    passes). The chat agent should:
+    - stream the prose
+    - emit `event: itinerary` with the validated payload
+    - record itinerary_emitted=True + days count on the trace
+    """
+    fake_anthropic_stream("chat_emit_itinerary")
+    monkeypatch.setattr(
+        chat_agent_module, "append_messages", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        chat_agent_module, "maybe_summarize", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        chat_agent_module, "generate_title", AsyncMock(return_value=None)
+    )
+
+    trace = _new_trace()
+    agent = ChatAgent(
+        db=fake_db,
+        request=ChatRequest(message="2 days starting from Tirana"),
+        ctx=_ctx(),
+        user_id=None,
+        trace=trace,
+        started_at=0.0,
+    )
+    frames = await _drain(agent.stream())
+
+    events = _events(frames)
+    assert "itinerary" in events
+    # No refine (no trip_id on the request).
+    assert "trip_refined" not in events
+    # itinerary_invalid would mean the geo validator rejected the cassette;
+    # the cassette is hand-curated to pass.
+    assert "itinerary_invalid" not in events
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert trace.itinerary_emitted is True
+    assert trace.itinerary_days == 2
+    # Cache tokens flow through unchanged from the cassette.
+    assert trace.cache_read_input_tokens == 3120
