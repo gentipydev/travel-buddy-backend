@@ -31,6 +31,13 @@ Transportation = Literal["walk", "taxi", "tram", "bus", "car", "other"]
 
 MAX_MESSAGE_LENGTH = 4000
 MAX_HISTORY_MESSAGES = 20
+# Cap on stops per day for AI-generated itineraries. A realistic day can
+# anchor 2–3 stops; beyond that the plan reads exciting in chat but
+# clutters the trip detail/map and is rarely executable. Enforced as a
+# Pydantic upper bound on the bulk-generation shapes (TripDayCreate,
+# TripDayCreateBody); refine tools (insert_stop, move_stop) treat it as
+# soft guidance so explicit user requests can still override.
+MAX_STOPS_PER_DAY = 3
 
 
 class ChatMessage(BaseModel):
@@ -104,7 +111,9 @@ class TripDayCreate(BaseModel):
     day_number: int = Field(ge=1)
     title: str | None = None
     base_city: str | None = None
-    stops: list[TripStopCreate] = Field(min_length=1)
+    stops: list[TripStopCreate] = Field(
+        min_length=1, max_length=MAX_STOPS_PER_DAY
+    )
 
 
 class TripCreate(BaseModel):
@@ -257,7 +266,9 @@ class TripDayCreateBody(BaseModel):
     day_number: int = Field(ge=1)
     title: str | None = None
     base_city: str | None = None
-    stops: list[TripStopCreate] = Field(default_factory=list)
+    stops: list[TripStopCreate] = Field(
+        default_factory=list, max_length=MAX_STOPS_PER_DAY
+    )
 
 
 class StopReorderItem(BaseModel):

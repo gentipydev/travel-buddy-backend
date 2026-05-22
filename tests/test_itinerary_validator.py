@@ -4,8 +4,15 @@ Pure pydantic — no FastAPI client, no async, no Anthropic mocks. The validator
 is a thin shape-and-schema gate; tests pin the behaviors the SSE generator and
 Flutter client both depend on.
 """
+import pytest
+from pydantic import ValidationError
 
+from app.schemas import MAX_STOPS_PER_DAY, TripDayCreateBody
 from app.tools.itinerary_validator import validate_itinerary
+
+
+def _stop(name: str) -> dict:
+    return {"name": name, "kind": "sight"}
 
 
 def test_valid_minimal_itinerary_passes():
@@ -156,3 +163,96 @@ def test_payload_excludes_none_values():
     stop = result.payload["days"][0]["stops"][0]
     assert "address" not in stop
     assert "arrival_time" not in stop
+
+
+# Stop-count cap (MAX_STOPS_PER_DAY) — enforces the "≤3 stops/day"
+# product rule on the LLM's bulk-generation path. The cap exists at the
+# Pydantic layer so the validator is the single source of truth for both
+# production rejection and the eval scorer.
+
+
+def test_3_stops_per_day_passes():
+    raw = {
+        "title": "Tirana compact",
+        "days": [
+            {
+                "day_number": 1,
+                "stops": [_stop("A"), _stop("B"), _stop("C")],
+            }
+        ],
+    }
+    assert validate_itinerary(raw).ok
+
+
+def test_2_stops_per_day_passes():
+    raw = {
+        "title": "Slow day",
+        "days": [
+            {"day_number": 1, "stops": [_stop("A"), _stop("B")]}
+        ],
+    }
+    assert validate_itinerary(raw).ok
+
+
+def test_4_stops_per_day_rejected():
+    raw = {
+        "title": "Overstuffed",
+        "days": [
+            {
+                "day_number": 1,
+                "stops": [_stop("A"), _stop("B"), _stop("C"), _stop("D")],
+            }
+        ],
+    }
+    result = validate_itinerary(raw)
+    assert not result.ok
+    # Error must surface the offending location and a length-related
+    # phrase so triage can spot cap violations vs other schema failures.
+    assert "stops" in result.error
+    assert "at most" in result.error or "max" in result.error.lower()
+
+
+def test_mixed_days_one_over_cap_rejected():
+    raw = {
+        "title": "One bad day",
+        "days": [
+            {
+                "day_number": 1,
+                "stops": [_stop("A"), _stop("B"), _stop("C")],
+            },
+            {
+                "day_number": 2,
+                "stops": [_stop("D"), _stop("E"), _stop("F"), _stop("G")],
+            },
+        ],
+    }
+    result = validate_itinerary(raw)
+    assert not result.ok
+    # The first error must pinpoint days.1.stops (the over-cap day),
+    # not days.0.stops which is exactly at the cap.
+    assert "days.1.stops" in result.error
+
+
+def test_trip_day_create_body_caps_stops():
+    """The refine `add_day` dispatcher validates input against
+    `TripDayCreateBody`. The cap must be enforced there too so the LLM
+    can't bulk-create a 4-stop day via add_day."""
+    payload = {
+        "day_number": 4,
+        "stops": [_stop("A"), _stop("B"), _stop("C"), _stop("D")],
+    }
+    with pytest.raises(ValidationError) as excinfo:
+        TripDayCreateBody.model_validate(payload)
+    assert any(
+        e["loc"][-1] == "stops" and e["type"] == "too_long"
+        for e in excinfo.value.errors()
+    )
+
+    # At-cap payloads still pass.
+    ok = TripDayCreateBody.model_validate(
+        {
+            "day_number": 4,
+            "stops": [_stop("A")] * MAX_STOPS_PER_DAY,
+        }
+    )
+    assert len(ok.stops) == MAX_STOPS_PER_DAY

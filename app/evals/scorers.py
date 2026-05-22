@@ -9,6 +9,10 @@ Public scorers:
 
   - `itinerary_schema_valid` — deterministic. Output must pass the same
     Pydantic validator the live chat handler uses (`validate_itinerary`).
+  - `stop_count_cap` — deterministic. Every day in the emitted itinerary
+    must have at most `MAX_STOPS_PER_DAY` stops. Distinct from
+    `itinerary_schema_valid` so Braintrust dashboards can triage cap
+    regressions separately from generic schema failures.
   - `geo_boundary_adherence` — deterministic. When the user's message
     names a single Albanian city, every emitted stop's `city` must match.
     This is the regression catcher for the 2026-05-18 incident where
@@ -28,8 +32,8 @@ from __future__ import annotations
 import unicodedata
 from typing import Any
 
+from app.schemas import MAX_STOPS_PER_DAY
 from app.tools.itinerary_validator import validate_itinerary
-
 
 # Canonical Albanian-city set with accepted spelling variants. All forms
 # lowercase + diacritic-stripped — comparisons go through `_canon()` so a
@@ -76,6 +80,27 @@ def itinerary_schema_valid(output: Any, **_: Any) -> float:
     if not isinstance(output, dict):
         return 0.0
     return 1.0 if validate_itinerary(output).ok else 0.0
+
+
+def stop_count_cap(output: Any, **_: Any) -> float:
+    """1.0 iff every day in `output` has at most `MAX_STOPS_PER_DAY`
+    stops, else 0.0.
+
+    Split out from `itinerary_schema_valid` so a cap regression doesn't
+    hide inside generic schema failures. Both scorers move together when
+    the cap is enforced as expected — if `stop_count_cap` drops while
+    `itinerary_schema_valid` stays at 1.0, the validator is silently
+    accepting >cap days (which shouldn't be possible while the Pydantic
+    `max_length` is in place).
+    """
+    if not isinstance(output, dict):
+        return 0.0
+    for day in (output.get("days") or []):
+        if not isinstance(day, dict):
+            return 0.0
+        if len(day.get("stops") or []) > MAX_STOPS_PER_DAY:
+            return 0.0
+    return 1.0
 
 
 def geo_boundary_adherence(

@@ -183,16 +183,18 @@ class ChatAgent:
                 _anthropic_start = time.perf_counter()
                 async with client.beta.prompt_caching.messages.stream(
                     model=settings.model_chat,
-                    # 8192 fits ~12-day itineraries with 6 stops/day plus the
-                    # intro/outro paragraph. The previous 2048 cap was hitting
-                    # `stop_reason: max_tokens` mid-tool-call, leaving Claude's
-                    # `emit_itinerary` input with a missing `days` field and
-                    # triggering an `itinerary_invalid` ("days: Field required")
-                    # on what should have been a healthy plan. Real itineraries
-                    # rarely need more than this and we only pay for tokens
-                    # actually generated, so a higher ceiling is mostly free.
-                    # Refine patch tools are O(edit-size), so this ceiling no
-                    # longer scales with trip size for incremental edits.
+                    # 8192 sits well above what the schema now allows
+                    # (`MAX_STOPS_PER_DAY=3`, so ~12 days × 3 stops + the
+                    # intro/outro paragraph). Sizing was originally picked
+                    # for ~6 stops/day under the older prompt, but the
+                    # headroom is still useful — refine patch tools are
+                    # O(edit-size) and don't scale with trip size, and the
+                    # previous 2048 cap was hitting `stop_reason: max_tokens`
+                    # mid-tool-call, leaving `emit_itinerary` input with a
+                    # missing `days` field and triggering `itinerary_invalid`
+                    # ("days: Field required") on otherwise healthy plans.
+                    # We only pay for tokens actually generated, so the
+                    # ceiling is mostly free.
                     max_tokens=8192,
                     system=system_payload,
                     messages=ctx.messages,

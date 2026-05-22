@@ -1,4 +1,5 @@
 """Move a single stop to a different day within the same trip."""
+from app.schemas import MAX_STOPS_PER_DAY
 
 MOVE_STOP_TOOL = {
     "name": "move_stop",
@@ -9,7 +10,9 @@ MOVE_STOP_TOOL = {
         "append, or pass a value >= len(target.stops) to append. Source-day "
         "sort_orders are compacted automatically. Same-day moves are "
         "rejected — use `reorder_stops` for that. Use when the user asks "
-        "to push a stop to another day (e.g. 'move Berat Castle to Day 3')."
+        "to push a stop to another day (e.g. 'move Berat Castle to Day 3'). "
+        f"Soft guideline: target days default to ≤{MAX_STOPS_PER_DAY} stops "
+        "for AI-initiated moves; follow an explicit user override."
     ),
     "input_schema": {
         "type": "object",

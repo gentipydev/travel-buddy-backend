@@ -13,6 +13,7 @@ from app.evals.scorers import (
     itinerary_schema_valid,
     persona_gate,
     refine_fidelity,
+    stop_count_cap,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "itinerary_schema_valid",
     "persona_gate",
     "refine_fidelity",
+    "stop_count_cap",
 ]
