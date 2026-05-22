@@ -501,11 +501,16 @@ async def apply_move_stop(
     # all in flight. Same trick as `apply_reorder_stops` — shift the moved
     # stop into a disjoint negative range first, then rearrange the two days
     # in their now-collision-free positive ranges.
+    #
+    # synchronize_session=False on all four statements: these are bulk SQL
+    # UPDATEs and the default "evaluate" strategy would mutate in-memory ORM
+    # objects to match, corrupting the sort_order bookkeeping we do below.
     SHIFT = 1_000_000
     await db.execute(
         update(TripStop)
         .where(TripStop.id == stop.id)
         .values(sort_order=TripStop.sort_order - SHIFT)
+        .execution_options(synchronize_session=False)
     )
     await db.execute(
         update(TripStop)
@@ -514,33 +519,33 @@ async def apply_move_stop(
             TripStop.sort_order > old_sort,
         )
         .values(sort_order=TripStop.sort_order - 1)
+        .execution_options(synchronize_session=False)
     )
-    if new_sort < target_len:
-        await db.execute(
-            update(TripStop)
-            .where(
-                TripStop.trip_day_id == target_day.id,
-                TripStop.sort_order >= new_sort,
-            )
-            .values(sort_order=TripStop.sort_order + 1)
+    # Always run Phase 3 — a gap in sort_orders from a prior deletion means
+    # new_sort == target_len is still a collision when a stop already sits at
+    # that position. A no-op UPDATE (0 rows matched) is safe.
+    await db.execute(
+        update(TripStop)
+        .where(
+            TripStop.trip_day_id == target_day.id,
+            TripStop.sort_order >= new_sort,
         )
+        .values(sort_order=TripStop.sort_order + 1)
+        .execution_options(synchronize_session=False)
+    )
     await db.execute(
         update(TripStop)
         .where(TripStop.id == stop.id)
         .values(trip_day_id=target_day.id, sort_order=new_sort)
+        .execution_options(synchronize_session=False)
     )
     # Sync the moved stop's in-memory fields so any later mutation that
-    # reads `stop.sort_order` / `stop.trip_day_id` sees the post-move
-    # state. Matches the ORM-mutate style of `apply_update_stop`.
+    # reads `stop.sort_order` / `stop.trip_day_id` sees the post-move state.
+    # Because synchronize_session=False was used above, Python objects still
+    # hold their pre-move sort_orders — partition on those to build target_after.
     stop.sort_order = new_sort
     stop.trip_day_id = target_day.id
     if recompute:
-        # Build the destination day's post-move order from the in-memory
-        # objects: existing stops still carry their ORIGINAL sort_order
-        # values (Python wasn't mutated by the SQL UPDATEs above), so
-        # partitioning on `< new_sort` and `>= new_sort` correctly places
-        # the moved `stop` at position `new_sort`. Source day is by design
-        # not rescheduled — leg drift on the survivors is accepted scope.
         target_after = (
             [s for s in target_day.stops if s.sort_order < new_sort]
             + [stop]
