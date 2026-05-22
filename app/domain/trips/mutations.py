@@ -16,19 +16,60 @@ from datetime import date
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import case, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Trip, TripDay, TripStop, utcnow
+from app.db.models import Trip, TripDay, TripRoute, TripStop, utcnow
 from app.domain.trips.repository import (
     _load_day,
     _load_stop,
     _load_trip,
     _touch_trip,
 )
+from app.domain.trips.scheduling import (
+    forward_walk_times,
+    nearest_insertion_index,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _load_route_cache_for_day(
+    db: AsyncSession, day_id: UUID,
+) -> dict[tuple[UUID, UUID], TripRoute]:
+    """Load `trip_routes` rows for a day, keyed by (from_stop_id, to_stop_id).
+
+    Cache hits cover pairs that were consecutive on the day before the
+    current mutation; newly-adjacent pairs miss and fall back to haversine
+    inside the scheduler. `enrich_trip` will repopulate the cache for the
+    post-mutation adjacencies during the serialize step that runs after
+    this mutation commits, so subsequent reorders pay no repeat Directions
+    cost on the same pairs.
+    """
+    stmt = select(TripRoute).where(TripRoute.trip_day_id == day_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {(r.from_stop_id, r.to_stop_id): r for r in rows}
+
+
+def _apply_forward_walk_updates(
+    ordered_stops: list[TripStop],
+    routes_by_pair: dict[tuple[UUID, UUID], TripRoute],
+) -> None:
+    """Compute realistic times for `ordered_stops` and mutate each stop's
+    `arrival_time`, `end_time`, `duration_minutes` via ORM setattr (same
+    pattern as `apply_update_stop`). SQLAlchemy will flush these as one
+    UPDATE per dirtied row at the next `db.flush()`. No-op when the day
+    has no anchored times (forward_walk_times returns [] for time-free
+    days)."""
+    updates = forward_walk_times(ordered_stops, routes_by_pair)
+    by_id = {s.id: s for s in ordered_stops}
+    for stop_id, fields in updates:
+        stop_obj = by_id.get(stop_id)
+        if stop_obj is None:
+            continue
+        for key, value in fields.items():
+            setattr(stop_obj, key, value)
 
 
 async def replace_trip_from_payload(
@@ -363,12 +404,21 @@ async def apply_reorder_stops(
         .where(TripStop.trip_day_id == day.id)
         .values(sort_order=case(new_order, value=TripStop.id))
     )
-    for sid, _, time_fields in parsed_order:
-        if not time_fields:
-            continue
-        await db.execute(
-            update(TripStop).where(TripStop.id == sid).values(**time_fields)
-        )
+    if payload.get("recompute_times"):
+        # Server-authoritative reschedule: per-item time fields in `order`
+        # are ignored, and times are forward-walked across the new ordering
+        # using cached travel durations (haversine + speed when no cache).
+        ordered_stops_after = sorted(day.stops, key=lambda s: new_order[s.id])
+        routes_by_pair = await _load_route_cache_for_day(db, day.id)
+        _apply_forward_walk_updates(ordered_stops_after, routes_by_pair)
+    else:
+        # Legacy slot-anchored path: per-item time fields land verbatim.
+        for sid, _, time_fields in parsed_order:
+            if not time_fields:
+                continue
+            await db.execute(
+                update(TripStop).where(TripStop.id == sid).values(**time_fields)
+            )
     await _touch_trip(db, trip_id)
     await db.flush()
     refreshed = await _load_trip(db, trip_id, user_id)
@@ -419,8 +469,25 @@ async def apply_move_stop(
     old_sort = stop.sort_order
     target_len = len(target_day.stops)
     requested = payload.get("sort_order")
+    auto_position = bool(payload.get("auto_position"))
+    recompute = bool(payload.get("recompute_times"))
+
+    # Load cached routes once when either operation needs them; both
+    # `nearest_insertion_index` (pre-move) and the destination reschedule
+    # (post-move) consult the same (from_stop_id, to_stop_id) cache.
+    routes_by_pair: dict[tuple[UUID, UUID], TripRoute] = {}
+    if auto_position or recompute:
+        routes_by_pair = await _load_route_cache_for_day(db, target_day.id)
+
     if requested is None:
-        new_sort = target_len
+        if auto_position and target_day.stops:
+            # Pick the insertion index that minimises total leg minutes on
+            # the destination day. Source day is intentionally untouched.
+            new_sort = nearest_insertion_index(
+                target_day.stops, stop, routes_by_pair
+            )
+        else:
+            new_sort = target_len
     else:
         requested_int = int(requested)
         if requested_int < 0:
@@ -462,6 +529,24 @@ async def apply_move_stop(
         .where(TripStop.id == stop.id)
         .values(trip_day_id=target_day.id, sort_order=new_sort)
     )
+    # Sync the moved stop's in-memory fields so any later mutation that
+    # reads `stop.sort_order` / `stop.trip_day_id` sees the post-move
+    # state. Matches the ORM-mutate style of `apply_update_stop`.
+    stop.sort_order = new_sort
+    stop.trip_day_id = target_day.id
+    if recompute:
+        # Build the destination day's post-move order from the in-memory
+        # objects: existing stops still carry their ORIGINAL sort_order
+        # values (Python wasn't mutated by the SQL UPDATEs above), so
+        # partitioning on `< new_sort` and `>= new_sort` correctly places
+        # the moved `stop` at position `new_sort`. Source day is by design
+        # not rescheduled — leg drift on the survivors is accepted scope.
+        target_after = (
+            [s for s in target_day.stops if s.sort_order < new_sort]
+            + [stop]
+            + [s for s in target_day.stops if s.sort_order >= new_sort]
+        )
+        _apply_forward_walk_updates(target_after, routes_by_pair)
     await _touch_trip(db, trip_id)
     await db.flush()
     refreshed = await _load_trip(db, trip_id, user_id)

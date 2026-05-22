@@ -613,3 +613,274 @@ async def test_apply_move_stop_404_when_target_day_missing(fake_db):
         )
     assert exc.value.status_code == 404
     assert "Target day" in exc.value.detail
+
+
+# ---------------------------------------------------------------------------
+# recompute_times / auto_position on reorder + move
+# ---------------------------------------------------------------------------
+
+
+def _stop_with_coords(
+    *, sort_order: int, lat: float, lng: float, arrival_time: str | None = None,
+    duration_minutes: int | None = None, kind: str = "sight",
+) -> TripStop:
+    """Builder for the rescheduler tests — needs lat/lng + arrival anchors
+    that the bare `_make_stop` factory doesn't expose."""
+    stop = _make_stop(sort_order=sort_order, kind=kind)
+    stop.lat = lat
+    stop.lng = lng
+    stop.arrival_time = arrival_time
+    stop.end_time = None
+    stop.duration_minutes = duration_minutes
+    return stop
+
+
+async def test_apply_reorder_stops_recompute_times_forward_walks(fake_db):
+    """When `recompute_times=True`, the server-authoritative forward-walk
+    stamps realistic times based on the NEW ordering and ignores any
+    per-position time fields the caller sent."""
+    s1 = _stop_with_coords(
+        sort_order=0, lat=41.3275, lng=19.8187,  # Tirana
+        arrival_time="09:00", duration_minutes=60, kind="sight",
+    )
+    s2 = _stop_with_coords(
+        sort_order=1, lat=41.3275, lng=19.8187,  # same coords → MIN_LEG floor
+        arrival_time="11:00", duration_minutes=60, kind="meal",
+    )
+    day = _make_day(stops=[s1, s2])
+    refreshed = _make_trip()
+    fake_db.queue(day)         # _load_day
+    fake_db.queue([])          # _load_route_cache_for_day → empty list
+    fake_db.queue(refreshed)   # _load_trip
+    await apply_reorder_stops(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, day_id=day.id,
+        payload={
+            "order": [
+                {"stop_id": str(s2.id), "sort_order": 0},
+                {"stop_id": str(s1.id), "sort_order": 1},
+            ],
+            "recompute_times": True,
+        },
+    )
+    # New order: [s2, s1]. Anchor = s2's existing arrival_time "11:00".
+    # MIN_LEG floor of 5 min between same-coord stops, so s1 lands at
+    # s2.end (12:00) + 5min = 12:05.
+    assert s2.arrival_time == "11:00"
+    assert s2.end_time == "12:00"
+    assert s1.arrival_time == "12:05"
+    assert s1.end_time == "13:05"
+
+
+async def test_apply_reorder_stops_recompute_times_skips_when_no_anchor(fake_db):
+    """Time-free trip guard: when no stop on the day has arrival_time set,
+    the rescheduler returns no updates and existing stops stay untimed."""
+    s1 = _stop_with_coords(sort_order=0, lat=41.3, lng=19.8, arrival_time=None)
+    s2 = _stop_with_coords(sort_order=1, lat=41.3, lng=19.8, arrival_time=None)
+    day = _make_day(stops=[s1, s2])
+    refreshed = _make_trip()
+    fake_db.queue(day)
+    fake_db.queue([])  # routes
+    fake_db.queue(refreshed)
+    await apply_reorder_stops(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, day_id=day.id,
+        payload={
+            "order": [
+                {"stop_id": str(s1.id), "sort_order": 0},
+                {"stop_id": str(s2.id), "sort_order": 1},
+            ],
+            "recompute_times": True,
+        },
+    )
+    assert s1.arrival_time is None
+    assert s2.arrival_time is None
+
+
+async def test_apply_reorder_stops_recompute_times_ignores_per_item_time_fields(fake_db):
+    """When recompute_times=True, per-item arrival/end/duration in the
+    `order` list are silently discarded — server is sole authority. This
+    documents that callers must not mix the two modes."""
+    s1 = _stop_with_coords(
+        sort_order=0, lat=41.3, lng=19.8, arrival_time="09:00",
+        duration_minutes=60, kind="sight",
+    )
+    s2 = _stop_with_coords(
+        sort_order=1, lat=41.3, lng=19.8, arrival_time="10:30",
+        duration_minutes=60, kind="sight",
+    )
+    day = _make_day(stops=[s1, s2])
+    refreshed = _make_trip()
+    fake_db.queue(day)
+    fake_db.queue([])
+    fake_db.queue(refreshed)
+    await apply_reorder_stops(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, day_id=day.id,
+        payload={
+            "order": [
+                # Caller tries to set bogus times — should be ignored.
+                {"stop_id": str(s1.id), "sort_order": 0,
+                 "arrival_time": "23:00", "end_time": "23:30"},
+                {"stop_id": str(s2.id), "sort_order": 1,
+                 "arrival_time": "23:45", "end_time": "23:55"},
+            ],
+            "recompute_times": True,
+        },
+    )
+    # Forward-walked from s1's 09:00, NOT the caller's 23:00.
+    assert s1.arrival_time == "09:00"
+    assert s2.arrival_time != "23:45"
+
+
+async def test_apply_reorder_stops_legacy_slot_anchored_preserved(fake_db):
+    """Regression: without the flag, the existing per-item time-field path
+    must still run so refine tools (Claude-emitted reorders) keep working."""
+    s1 = _stop_with_coords(
+        sort_order=0, lat=41.3, lng=19.8, arrival_time="09:00",
+    )
+    s2 = _stop_with_coords(
+        sort_order=1, lat=41.3, lng=19.8, arrival_time="11:00",
+    )
+    day = _make_day(stops=[s1, s2])
+    refreshed = _make_trip()
+    fake_db.queue(day)
+    fake_db.queue(refreshed)
+    await apply_reorder_stops(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, day_id=day.id,
+        payload={
+            "order": [
+                {"stop_id": str(s2.id), "sort_order": 0,
+                 "arrival_time": "09:30"},
+                {"stop_id": str(s1.id), "sort_order": 1,
+                 "arrival_time": "11:30"},
+            ],
+        },
+    )
+    # No route-cache SELECT runs in the legacy path → existing 5+2 = 7
+    # executes (SHIFT, CASE, two per-item UPDATEs, _touch_trip, _load_trip).
+    # We only check the per-item writes landed.
+    assert len(fake_db.executed) == 7
+
+
+async def test_apply_move_stop_recompute_times_reschedules_destination(fake_db):
+    """Cross-day move with `recompute_times=True` forward-walks the
+    destination day's times after the moved stop is inserted."""
+    source_day_id = uuid.uuid4()
+    target_existing = _stop_with_coords(
+        sort_order=0, lat=41.3275, lng=19.8187,  # Tirana
+        arrival_time="09:00", duration_minutes=60, kind="sight",
+    )
+    target_day = _make_day(day_id=uuid.uuid4(), stops=[target_existing])
+    moved = _stop_with_coords(
+        sort_order=0, lat=41.3275, lng=19.8187,  # same coords
+        arrival_time="14:00",  # original time on source day — must be discarded
+        duration_minutes=60, kind="meal",
+    )
+    moved.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(moved)
+    fake_db.queue(target_day)
+    fake_db.queue([])  # _load_route_cache_for_day
+    fake_db.queue(refreshed)
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=moved.id,
+        payload={
+            "target_day_id": str(target_day.id),
+            "recompute_times": True,
+        },
+    )
+    # Destination order after move: [target_existing, moved] (appended end).
+    # Forward-walk: target_existing anchors 09:00 → 10:00; moved arrives
+    # 10:00 + MIN_LEG (5) = 10:05.
+    assert target_existing.arrival_time == "09:00"
+    assert target_existing.end_time == "10:00"
+    assert moved.arrival_time == "10:05"
+    assert moved.end_time == "11:05"
+
+
+async def test_apply_move_stop_recompute_times_leaves_source_day_unchanged(fake_db):
+    """The plan deliberately scopes reschedule to the destination day.
+    The source day's surviving stops keep their original times — only
+    travel legs between them drift slightly, which we accept."""
+    source_day_id = uuid.uuid4()
+    target_day = _make_day(day_id=uuid.uuid4(), stops=[])
+    moved = _stop_with_coords(
+        sort_order=0, lat=41.3, lng=19.8,
+        arrival_time="14:00", duration_minutes=60, kind="meal",
+    )
+    moved.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(moved)
+    fake_db.queue(target_day)
+    fake_db.queue([])  # routes
+    fake_db.queue(refreshed)
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=moved.id,
+        payload={
+            "target_day_id": str(target_day.id),
+            "recompute_times": True,
+        },
+    )
+    # The moved stop is rescheduled (target had no anchor, but moved has
+    # arrival_time="14:00" → moved stays 14:00 as the only stamped stop).
+    # No source-day SELECT / UPDATE happens — the source-side compaction
+    # via the existing UPDATE doesn't touch times.
+    assert moved.arrival_time == "14:00"
+
+
+async def test_apply_move_stop_auto_position_picks_nearest_insertion(fake_db):
+    """When `auto_position=True` and `sort_order` is omitted, the server
+    inserts at the geographically-best index instead of appending at end.
+
+    Day: Tirana → Vlorë. Inserting Berat (geographically between them)
+    should land at sort_order=1, not the default 2 (end-of-day)."""
+    source_day_id = uuid.uuid4()
+    tirana = _stop_with_coords(sort_order=0, lat=41.3275, lng=19.8187)
+    vlore = _stop_with_coords(sort_order=1, lat=40.4686, lng=19.4914)
+    target_day = _make_day(day_id=uuid.uuid4(), stops=[tirana, vlore])
+    moved = _stop_with_coords(sort_order=0, lat=40.7038, lng=19.9457)  # Berat
+    moved.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(moved)
+    fake_db.queue(target_day)
+    fake_db.queue([])  # routes (empty — falls back to haversine)
+    fake_db.queue(refreshed)
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=moved.id,
+        payload={
+            "target_day_id": str(target_day.id),
+            "auto_position": True,
+        },
+    )
+    # Berat sits geographically between Tirana (existing index 0) and Vlorë
+    # (existing index 1), so nearest-insertion picks position 1 instead of
+    # the default end-of-day (2). In-memory sync in the handler mirrors the
+    # SQL so we can assert on `moved.sort_order` directly.
+    assert moved.sort_order == 1
+    assert moved.trip_day_id == target_day.id
+
+
+async def test_apply_move_stop_with_explicit_sort_order_ignores_auto_position(fake_db):
+    """When the caller provides an explicit `sort_order`, `auto_position`
+    is a no-op — the explicit choice wins so the user's drag-to-position
+    intent (when it eventually exists) is always respected."""
+    source_day_id = uuid.uuid4()
+    a = _stop_with_coords(sort_order=0, lat=41.3275, lng=19.8187)
+    b = _stop_with_coords(sort_order=1, lat=40.4686, lng=19.4914)
+    target_day = _make_day(day_id=uuid.uuid4(), stops=[a, b])
+    moved = _stop_with_coords(sort_order=0, lat=40.7038, lng=19.9457)
+    moved.trip_day_id = source_day_id
+    refreshed = _make_trip()
+    fake_db.queue(moved)
+    fake_db.queue(target_day)
+    fake_db.queue([])  # routes (loaded because auto_position=True)
+    fake_db.queue(refreshed)
+    await apply_move_stop(
+        fake_db, trip_id=uuid.uuid4(), user_id=_USER_ID, stop_id=moved.id,
+        payload={
+            "target_day_id": str(target_day.id),
+            "sort_order": 0,        # explicit override
+            "auto_position": True,  # ignored when sort_order is set
+        },
+    )
+    # Explicit sort_order=0 must win over auto_position. With target_len=2
+    # and requested=0, the handler clamps to min(0, 2)=0.
+    assert moved.sort_order == 0

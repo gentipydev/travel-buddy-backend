@@ -293,6 +293,11 @@ class StopReorderBody(BaseModel):
     new ordering so the server can validate the set matches what's on disk."""
     model_config = ConfigDict(extra="forbid")
     order: list[StopReorderItem] = Field(min_length=1)
+    # When true, server forward-walks realistic times for the day using
+    # cached travel durations and ignores per-item arrival_time/end_time.
+    # Default false preserves the legacy slot-anchored behaviour for refine
+    # tools and any caller that wants explicit per-item control.
+    recompute_times: bool = False
 
 
 class StopMoveBody(BaseModel):
@@ -303,6 +308,13 @@ class StopMoveBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_day_id: UUID
     sort_order: int | None = Field(default=None, ge=0)
+    # When true, server reschedules the destination day after the move using
+    # forward-walked realistic times. Source day is intentionally untouched.
+    recompute_times: bool = False
+    # When true AND sort_order is None, server picks the destination index
+    # via nearest-insertion (minimises total travel duration on the
+    # destination day) instead of appending at the end.
+    auto_position: bool = False
 
 
 class UpdatePreferencesRequest(BaseModel):
