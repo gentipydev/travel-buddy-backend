@@ -528,9 +528,10 @@ async def test_apply_move_stop_uses_updates_not_delete_and_create(fake_db):
 
 
 async def test_apply_move_stop_appends_when_no_sort_order(fake_db):
-    """`sort_order` omitted → moved stop lands at end of target. Target has
-    no stops, so the target-shift UPDATE is skipped: stop-shift to negative
-    range, source compaction, reattach, _touch_trip = 4 UPDATEs."""
+    """`sort_order` omitted → moved stop lands at end of target. Empty
+    target → Phase 3's per-row descending loop iterates zero rows, so no
+    SQL fires for the target shift: stop-shift to negative range, source
+    compaction, reattach, _touch_trip = 4 UPDATEs."""
     source_day_id = uuid.uuid4()
     target_day = _make_day(day_id=uuid.uuid4(), stops=[])
     stop = _make_stop(sort_order=2)
@@ -544,7 +545,7 @@ async def test_apply_move_stop_appends_when_no_sort_order(fake_db):
         payload={"target_day_id": str(target_day.id)},
     )
     # 7 executes: _load_stop (S) + _load_day (S) + 4 UPDATEs + _load_trip
-    # (S). Empty target skips the phase-2b shift UPDATE.
+    # (S). Empty target → Phase 3 loop is a no-op.
     assert len(fake_db.executed) == 7
 
 

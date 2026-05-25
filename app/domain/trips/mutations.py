@@ -521,18 +521,25 @@ async def apply_move_stop(
         .values(sort_order=TripStop.sort_order - 1)
         .execution_options(synchronize_session=False)
     )
-    # Always run Phase 3 — a gap in sort_orders from a prior deletion means
-    # new_sort == target_len is still a collision when a stop already sits at
-    # that position. A no-op UPDATE (0 rows matched) is safe.
-    await db.execute(
-        update(TripStop)
-        .where(
-            TripStop.trip_day_id == target_day.id,
-            TripStop.sort_order >= new_sort,
+    # Phase 3: free `new_sort` on target_day by shifting stops at >= new_sort
+    # up by 1. Can't be a single bulk `sort_order + 1` UPDATE — Postgres
+    # checks UNIQUE constraints per row (not at statement end), and the
+    # unique index scans rows ascending, so `1 → 2` collides with the row
+    # still sitting at 2. Iterating per-row in DESCENDING order guarantees
+    # each shift lands in a slot the previous shift just emptied. Also
+    # naturally handles sort_order gaps from prior deletions: iterating
+    # matched stops covers `new_sort == target_len` collisions too.
+    for shifted_stop in sorted(
+        [s for s in target_day.stops if s.sort_order >= new_sort],
+        key=lambda s: s.sort_order,
+        reverse=True,
+    ):
+        await db.execute(
+            update(TripStop)
+            .where(TripStop.id == shifted_stop.id)
+            .values(sort_order=shifted_stop.sort_order + 1)
+            .execution_options(synchronize_session=False)
         )
-        .values(sort_order=TripStop.sort_order + 1)
-        .execution_options(synchronize_session=False)
-    )
     await db.execute(
         update(TripStop)
         .where(TripStop.id == stop.id)
