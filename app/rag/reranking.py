@@ -34,9 +34,12 @@ async def rerank_chunks(
     if not chunks:
         return [], None
 
-    co = get_cohere()
     started = time.perf_counter()
     try:
+        # get_cohere() raises RuntimeError when COHERE_API_KEY is unset — keep
+        # it inside the try so a missing key degrades to embed-only order
+        # instead of crashing the whole chat turn.
+        co = get_cohere()
         response = await co.rerank(
             model=settings.rerank_model,
             query=query,
