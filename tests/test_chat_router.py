@@ -220,6 +220,7 @@ def _ctx(
         conversation=None,
         new_conversation_id=new_conversation_id,
         place_card_payload=place_card_payload,
+        rag_sources_payload=None,
         retrieval_used=False,
         chunks_returned=0,
         top_rerank_score=None,

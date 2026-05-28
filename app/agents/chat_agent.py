@@ -143,6 +143,7 @@ class ChatAgent:
                         else None
                     ),
                     "place_card_emitted": ctx.place_card_payload is not None,
+                    "rag_sources_emitted": ctx.rag_sources_payload is not None,
                     "retrieval_used": ctx.retrieval_used,
                     "chunks_returned": ctx.chunks_returned,
                     "top_rerank_score": ctx.top_rerank_score,
@@ -154,6 +155,11 @@ class ChatAgent:
                     yield f"event: conversation_id\ndata: {ctx.new_conversation_id}\n\n"
                 if ctx.place_card_payload is not None:
                     yield f"event: place_card\ndata: {ctx.place_card_payload}\n\n"
+                if ctx.rag_sources_payload is not None:
+                    # Provenance for the grounded turn: the client renders an
+                    # "N sources" chip on the assistant bubble. Pre-serialized
+                    # in prepare_turn; emitted here (well before [DONE]).
+                    yield f"event: rag_sources\ndata: {ctx.rag_sources_payload}\n\n"
                 # Refine turns get the surgical patch tools too (update_stop,
                 # delete_stop, …). Initial creation / open chat keeps just
                 # emit_itinerary so a casual planner can't accidentally edit a
