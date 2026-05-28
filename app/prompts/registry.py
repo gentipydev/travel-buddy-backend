@@ -104,9 +104,10 @@ PROMPTS: dict[str, Prompt] = {
         notes="Appended when preferences exist; tells Claude to follow conversation over defaults.",
     ),
     "chat.itinerary_tool_addendum": _make(
-        "chat.itinerary_tool_addendum", "2026-05-18", "chat/itinerary_tool_addendum.md",
+        "chat.itinerary_tool_addendum", "2026-05-28", "chat/itinerary_tool_addendum.md",
         cache_eligible=True,
-        notes="The 'write the full plan in prose AND call emit_itinerary' rule.",
+        notes="The 'write the full plan in prose AND call emit_itinerary' rule. "
+        "2026-05-28: allow single-day itineraries (was multi-day only).",
     ),
     # Refine carries the trip JSON which varies every turn — never cache.
     "chat.refine_addendum": _make(

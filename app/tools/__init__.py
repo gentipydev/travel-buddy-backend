@@ -2,9 +2,9 @@
 
 Two kinds of tool today:
 
-  - `itinerary_tool` (the `emit_itinerary` tool) — full multi-day plan
+  - `itinerary_tool` (the `emit_itinerary` tool) — structured itinerary
     emission. Offered on every chat turn; Claude is instructed to call it
-    only when the user asks for a multi-day plan.
+    when the user asks for a day-by-day plan, one day or many.
   - `refine/*` — seven surgical patch tools (`update_stop`, `insert_stop`,
     `delete_stop`, `reorder_stops`, `add_day`, `delete_day`, `update_trip`)
     offered only on refine turns (when `ctx.refine_trip is not None`).

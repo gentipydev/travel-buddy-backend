@@ -1,7 +1,8 @@
-"""Anthropic tool definition for emitting structured multi-day itineraries.
+"""Anthropic tool definition for emitting structured itineraries.
 
-Claude calls `emit_itinerary` when (and only when) the user asks for a
-multi-day trip plan. The tool's JSON `input` is forwarded to the Flutter
+Claude calls `emit_itinerary` when the user asks for a day-by-day trip
+plan — whether it spans a single day or several. The tool's JSON `input`
+is forwarded to the Flutter
 client as a parallel `event: itinerary` SSE frame and rendered as an
 itinerary card; the conversational text continues to stream live as
 ordinary `data:` events that render in the chat bubble. We never execute
@@ -12,11 +13,12 @@ not as a callback request, so no `tool_result` follow-up turn is needed.
 ITINERARY_TOOL = {
     "name": "emit_itinerary",
     "description": (
-        "Emit a structured multi-day itinerary alongside your text reply. "
-        "Call this ONLY when the user asks for a multi-day plan, a "
-        "day-by-day schedule, or a routed trip across two or more days. "
+        "Emit a structured itinerary alongside your text reply. "
+        "Call this when the user asks for an itinerary, a day-by-day "
+        "schedule, or a routed trip — whether it spans a single day or "
+        "many. A one-day plan of two or more sequenced stops counts. "
         "Do NOT call it for single recommendations, factual questions, "
-        "opinions, greetings, casual chat, or trivial single-day asks. "
+        "opinions, greetings, casual chat, or a one-off place suggestion. "
         "When you call this tool, you MUST also write a brief, warm "
         "conversational reply in the same response — never call the tool "
         "in silence."

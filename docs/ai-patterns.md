@@ -136,7 +136,7 @@ cache-busting the prefix.
 Claude has two ways to mutate a trip:
 
 - **`emit_itinerary`** ([`itinerary_tool.py`](../app/tools/itinerary_tool.py))
-  — the full multi-day plan, emitted alongside the assistant's text
+  — the full day-by-day plan (one day or many), emitted alongside the assistant's text
   reply. On the initial-creation chat path this becomes
   `event: itinerary` in the SSE stream and powers the "Save itinerary"
   button. On refine turns it triggers
