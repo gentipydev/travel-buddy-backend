@@ -13,7 +13,6 @@ fields landed on `self.trace`.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -91,7 +90,6 @@ def _ctx(
     conversation: Conversation | None = None,
     refine_trip: Trip | None = None,
     new_conversation_id: uuid.UUID | None = None,
-    rag_sources_payload: str | None = None,
 ) -> ChatTurnContext:
     return ChatTurnContext(
         cached_prefix="BASE",
@@ -100,7 +98,6 @@ def _ctx(
         conversation=conversation,
         new_conversation_id=new_conversation_id,
         place_card_payload=None,
-        rag_sources_payload=rag_sources_payload,
         retrieval_used=False,
         chunks_returned=0,
         top_rerank_score=None,
@@ -382,76 +379,6 @@ async def test_persist_failed_event_emitted_before_done(monkeypatch, fake_db):
         i for i, f in enumerate(frames) if f == "data: [DONE]\n\n"
     )
     assert persist_idx < done_idx
-
-
-async def test_rag_sources_event_emitted_before_done(monkeypatch, fake_db):
-    """When the turn is grounded, the agent emits `event: rag_sources` (the
-    provenance the Flutter client renders as an "N sources" chip) with the
-    pre-serialized payload, and it lands BEFORE [DONE]."""
-    conv = _make_conv()
-    monkeypatch.setattr(
-        chat_agent_module,
-        "client",
-        _fake_client(
-            text_chunks=["hi"],
-            final_message=_final_message(content=[_text_block("hi")]),
-        ),
-    )
-    monkeypatch.setattr(chat_agent_module, "append_messages", AsyncMock())
-    monkeypatch.setattr(chat_agent_module, "generate_title", AsyncMock())
-    monkeypatch.setattr(chat_agent_module, "maybe_summarize", AsyncMock())
-
-    payload = json.dumps({
-        "count": 1,
-        "sources": [{"title": "Berat", "snippet": "Berat is a UNESCO site"}],
-    })
-    trace = _new_trace()
-    agent = ChatAgent(
-        db=fake_db,
-        request=ChatRequest(message="Tell me about Berat"),
-        ctx=_ctx(conversation=conv, rag_sources_payload=payload),
-        user_id=None,
-        trace=trace,
-        started_at=0.0,
-    )
-    frames = await _drain(agent.stream())
-
-    events = _events(frames)
-    assert "rag_sources" in events
-    rag_idx = next(
-        i for i, f in enumerate(frames) if f.startswith("event: rag_sources")
-    )
-    done_idx = next(i for i, f in enumerate(frames) if f == "data: [DONE]\n\n")
-    assert rag_idx < done_idx
-    # Payload bytes are written verbatim.
-    assert payload in frames[rag_idx]
-
-
-async def test_rag_sources_event_absent_when_no_payload(monkeypatch, fake_db):
-    """Ungrounded turn (no payload) emits no rag_sources frame."""
-    conv = _make_conv()
-    monkeypatch.setattr(
-        chat_agent_module,
-        "client",
-        _fake_client(
-            text_chunks=["hi"],
-            final_message=_final_message(content=[_text_block("hi")]),
-        ),
-    )
-    monkeypatch.setattr(chat_agent_module, "append_messages", AsyncMock())
-    monkeypatch.setattr(chat_agent_module, "generate_title", AsyncMock())
-    monkeypatch.setattr(chat_agent_module, "maybe_summarize", AsyncMock())
-
-    agent = ChatAgent(
-        db=fake_db,
-        request=ChatRequest(message="hi"),
-        ctx=_ctx(conversation=conv),
-        user_id=None,
-        trace=_new_trace(),
-        started_at=0.0,
-    )
-    frames = await _drain(agent.stream())
-    assert "rag_sources" not in _events(frames)
 
 
 # ---------------------------------------------------------------------------

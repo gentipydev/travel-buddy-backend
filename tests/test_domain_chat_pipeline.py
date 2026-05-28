@@ -14,7 +14,6 @@ the returned ChatTurnContext.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 
@@ -168,53 +167,6 @@ async def test_no_rag_leaves_volatile_suffix_bare(monkeypatch, fake_db):
     assert ctx.retrieval_used is False
     assert ctx.chunks_returned == 0
     assert "BEGIN REFERENCE MATERIAL" not in ctx.volatile_suffix
-    assert ctx.rag_sources_payload is None
-
-
-def test_build_rag_sources_prefers_context_header_for_title():
-    class _C:
-        def __init__(self, content, context=None):
-            self.content = content
-            self.context = context
-
-    chunks = [
-        _C(
-            "Berat is a UNESCO World Heritage city known for its Ottoman houses.",
-            context="Berat Castle, Berat, Berat County, historic site",
-        ),
-        _C("Visit the Onufri Museum inside the castle walls."),  # no context
-    ]
-    sources = pipeline_module._build_rag_sources(chunks)
-    assert len(sources) == 2
-    # Title from the contextual header's first comma-segment.
-    assert sources[0]["title"] == "Berat Castle"
-    assert sources[0]["snippet"].startswith("Berat is a UNESCO")
-    # No context → title falls back to the truncated first line of content.
-    assert sources[1]["title"] == "Visit the Onufri Museum inside the castl"
-    assert len(sources[1]["title"]) <= 40
-    assert len(sources[1]["snippet"]) <= 100
-
-
-async def test_rag_sources_payload_populated_when_chunks_retrieved(
-    monkeypatch, fake_db
-):
-    class _C:
-        def __init__(self, content, context=None):
-            self.content = content
-            self.context = context
-
-    chunks = [_C("Berat is a UNESCO site", context="Berat, Berat County")]
-    _stub_pipeline_helpers(monkeypatch, chunks=chunks)
-    ctx = await prepare_turn(
-        ChatRequest(message="Tell me about Berat"),
-        supa_user=None,
-        db=fake_db,
-    )
-    assert ctx.rag_sources_payload is not None
-    payload = json.loads(ctx.rag_sources_payload)
-    assert payload["count"] == 1
-    assert payload["sources"][0]["title"] == "Berat"
-    assert payload["sources"][0]["snippet"] == "Berat is a UNESCO site"
 
 
 # ---------------------------------------------------------------------------

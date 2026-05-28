@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Chunk, Conversation, Trip, User, UserPreferences
+from app.db.models import Conversation, Trip, User, UserPreferences
 from app.domain.conversations.repository import (
     build_history,
     get_or_create_conversation,
@@ -52,12 +52,6 @@ class ChatTurnContext:
     conversation: Conversation | None
     new_conversation_id: UUID | None
     place_card_payload: str | None
-    # Pre-serialized JSON for the SSE `rag_sources` frame:
-    # {"count": n, "sources": [{"title", "snippet"}, ...]}. None when the turn
-    # wasn't grounded. Mirrors `place_card_payload` (serialized in prepare_turn
-    # so the chat agent just writes the bytes). Surfaces RAG provenance to the
-    # client; never feeds the model prompt.
-    rag_sources_payload: str | None
     retrieval_used: bool
     chunks_returned: int
     top_rerank_score: float | None
@@ -72,36 +66,6 @@ class ChatTurnContext:
         """Concatenated cached_prefix + volatile_suffix. Retained for any
         legacy reader; the chat router prefers the two-part payload."""
         return self.cached_prefix + self.volatile_suffix
-
-
-def _build_rag_sources(chunks: list[Chunk]) -> list[dict]:
-    """Build client-facing provenance summaries for the retrieved chunks.
-
-    One entry per chunk (so the count matches `chunks_returned`):
-      - title:  first comma-segment of the contextual header (place name,
-                city, region…) when present, else the first line of `content`
-                truncated to ~40 chars.
-      - snippet: first line of `content` truncated to ~100 chars.
-
-    `Chunk.context` is index-only and must never reach the model prompt; here
-    it is used purely to derive a human-readable source label for the UI.
-    """
-    sources: list[dict] = []
-    for c in chunks:
-        first_line = (c.content or "").strip().splitlines()
-        head = first_line[0].strip() if first_line else ""
-        # getattr guards lightweight test doubles / future shape changes —
-        # provenance must never break the chat path.
-        context = getattr(c, "context", None)
-        if context:
-            title = context.split(",")[0].strip()
-        else:
-            title = head[:40].strip()
-        sources.append({
-            "title": title or "Source",
-            "snippet": head[:100].strip(),
-        })
-    return sources
 
 
 async def prepare_turn(
@@ -207,12 +171,6 @@ async def prepare_turn(
     )
     retrieval_used = bool(retrieved)
     chunks_returned = len(retrieved)
-    rag_sources_payload: str | None = None
-    if retrieved:
-        _sources = _build_rag_sources(retrieved)
-        rag_sources_payload = json.dumps(
-            {"count": len(_sources), "sources": _sources}
-        )
 
     if retrieved:
         # Defense-in-depth: wrap retrieved chunk content in explicit
@@ -276,7 +234,6 @@ async def prepare_turn(
         conversation=conversation,
         new_conversation_id=new_conversation_id,
         place_card_payload=card_payload,
-        rag_sources_payload=rag_sources_payload,
         retrieval_used=retrieval_used,
         chunks_returned=chunks_returned,
         top_rerank_score=top_rerank_score,
