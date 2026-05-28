@@ -43,6 +43,7 @@ from app.evals import (
     answer_faithfulness,
     geo_boundary_adherence,
     itinerary_schema_valid,
+    output_guardrail,
     persona_gate,
     refine_fidelity,
     retrieval_hit_rate,
@@ -317,6 +318,17 @@ async def faithfulness_live_task(input: dict[str, Any]) -> dict[str, Any]:
     return {"answer": answer, "context": context}
 
 
+async def output_guardrail_task(input: dict[str, Any]) -> str:
+    """Pass the fixture's `input.response` directly to the scorer.
+
+    The output guardrail scorer is an offline calibration judge — it takes
+    a pre-baked assistant reply (from the fixture) and labels it SAFE/REVIEW.
+    No live /chat/stream call needed; the task is purely a passthrough so
+    the Braintrust Eval() framework can apply the scorer.
+    """
+    return input.get("input", {}).get("response", "")
+
+
 # ---------------------------------------------------------------------- #
 # Eval definitions                                                       #
 # ---------------------------------------------------------------------- #
@@ -377,6 +389,15 @@ def main() -> None:
         task=faithfulness_live_task,
         scores=[answer_faithfulness],
         metadata={"suite": "faithfulness-live"},
+    )
+
+    Eval(
+        "travel-buddy",
+        experiment_name="output-guardrail",
+        data=lambda: _load_jsonl("output_guardrail.jsonl"),
+        task=output_guardrail_task,
+        scores=[output_guardrail],
+        metadata={"suite": "output-guardrail"},
     )
 
 

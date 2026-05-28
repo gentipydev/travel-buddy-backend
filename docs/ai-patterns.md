@@ -237,3 +237,82 @@ shape on later turns:
 Resumed conversations preserve visual context — a user who uploaded a
 photo of a beach can ask "what was that beach again?" three turns later
 and Claude still sees the image.
+
+## 7. Output safety guardrail
+
+[`app/domain/output_guard.py`](../app/domain/output_guard.py) ·
+[`app/agents/chat_agent.py`](../app/agents/chat_agent.py) (hook point) ·
+[`app/prompts/output_guard/system.md`](../app/prompts/output_guard/system.md)
+
+### What it is
+
+An observational, fail-open guardrail that runs after the assistant's reply
+has been fully streamed to the client. It calls Haiku with a narrow binary
+classifier (`SAFE` / `REVIEW`) to flag three violation types:
+
+1. **System-prompt leaks** — the model quotes or paraphrases its operating
+   instructions in the reply.
+2. **Harmful content** — dangerous advice, hate speech, or content that could
+   cause real-world harm.
+3. **Severe off-topic** — the reply has abandoned travel assistance entirely
+   (e.g. financial fraud instructions, extremist content). A polite redirect
+   is explicitly *not* off-topic.
+
+Ambiguous cases default to `"safe"` — the prompt is intentionally narrow.
+
+### Why observational-only
+
+The text is already in the client's buffer before the guardrail runs. It is
+**not** a blocking gate; `"review"` is a signal for offline analysis and
+Braintrust monitoring, not a runtime rejection. This keeps the design
+fail-open: a guardrail outage or timeout never degrades the user experience.
+
+### Hook point and latency budget
+
+```
+[text tokens stream live]      ← user sees text immediately
+[persist conversation]         +50–150 ms
+[output_guardrail stage]       +100–200 ms  ← Haiku call, max_tokens=8
+[DONE]
+```
+
+The guardrail fits inside `with self.trace.stage("output_guardrail"):`,
+between `append_messages` and `yield "data: [DONE]\n\n"`, so its latency
+is automatically recorded in `stage_latencies` and the result is available
+to `span.log()` before the Braintrust span closes.
+
+### Fail-open contract
+
+`check_output_guardrail()` never raises. Three paths return `"safe"`:
+
+| Condition | Behaviour |
+|-----------|-----------|
+| Empty / whitespace-only text | `"safe"` immediately, no API call |
+| `asyncio.TimeoutError` after 5 s | `"safe"` + WARNING log |
+| Any other exception | `"safe"` + WARNING log |
+
+### Telemetry
+
+Every `RequestTrace` JSON line includes `"output_guard_label": "safe" | "review" | null`.
+`null` means the guard was skipped (empty text or the agent errored before
+`assistant_text` was populated). Every Braintrust span carries the same field
+in `metadata.output_guard_label` alongside `stage_latencies.output_guardrail`.
+
+### Eval suite
+
+`evals/fixtures/output_guardrail.jsonl` (10 fixtures: 5 safe, 5 review)
+calibrates the judge offline. Run via Braintrust:
+
+```bash
+python -m evals.runners.braintrust_run  # triggers "output-guardrail" experiment
+```
+
+The CI fixture guard (`tests/test_eval_fixtures.py::test_output_guardrail_fixtures_are_valid`)
+validates fixture format without any API calls.
+
+### Prompt versioning
+
+The guard prompt lives in the registry (`"output_guard.system"`, version
+`2026-05-28`). The eval scorer loads the same entry, so the offline
+calibration suite always reflects the production prompt — bumping the `.md`
+file and the version string in `registry.py` keeps both in sync.

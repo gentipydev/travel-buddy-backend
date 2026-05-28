@@ -142,6 +142,15 @@ PROMPTS: dict[str, Prompt] = {
     "persona.refresh_system": _make(
         "persona.refresh_system", "2026-05-18", "persona/refresh_system.md", cache_eligible=False,
     ),
+    # --- Output safety ---------------------------------------------------
+    # Runs once per turn post-assembly. Per-response variation means the
+    # cache write cost exceeds savings; not eligible.
+    "output_guard.system": _make(
+        "output_guard.system", "2026-05-28", "output_guard/system.md",
+        cache_eligible=False,
+        notes="Binary SAFE/REVIEW classifier. Checks for system-prompt leaks, "
+              "harmful content, and severe off-topic replies.",
+    ),
 }
 
 

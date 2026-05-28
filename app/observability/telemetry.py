@@ -64,6 +64,10 @@ class RequestTrace:
     # `app/observability/pricing.py`. 0.0 when the model is missing from
     # the pricing table — telemetry must never crash on an unknown SKU.
     estimated_cost_usd: float = 0.0
+    # "safe" | "review" set by the output guardrail stage; None when the
+    # guardrail was skipped (empty assistant text) or the guard call failed
+    # (fail-open — not an error, just no signal for this turn).
+    output_guard_label: str | None = None
 
     @contextmanager
     def stage(self, name: str):

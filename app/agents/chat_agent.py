@@ -32,6 +32,7 @@ from app.domain.conversations import (
     generate_title,
     maybe_summarize,
 )
+from app.domain.output_guard import check_output_guardrail
 from app.domain.trips.mutations import replace_trip_from_payload
 from app.domain.trips.repository import serialize_trip
 from app.llm import (
@@ -427,6 +428,25 @@ class ChatAgent:
                             yield "event: persist_failed\ndata: server_persist_failed\n\n"
                             logger.exception("conversation persist failed")
 
+                # Output guardrail — fail-open, observational only. The reply
+                # is already in the client's buffer; we are auditing, not
+                # blocking. Adds ~100-200 ms Haiku latency to [DONE] (the
+                # text is already rendered on the client — comparable to the
+                # persistence window above). Result is written to
+                # self.trace.output_guard_label before span.log() below.
+                if assistant_text:
+                    with self.trace.stage("output_guardrail"):
+                        try:
+                            label = await check_output_guardrail(
+                                assistant_text, client=client
+                            )
+                            self.trace.output_guard_label = label
+                        except Exception:
+                            logger.warning(
+                                "output_guardrail stage failed — fail open",
+                                exc_info=True,
+                            )
+
                 yield "data: [DONE]\n\n"
 
                 # Telemetry — JSON-line sink + Braintrust span output. Both
@@ -470,6 +490,7 @@ class ChatAgent:
                         "itinerary_emitted": itinerary_emitted,
                         "itinerary_days": itinerary_days,
                         "itinerary_validation_error": itinerary_validation_error,
+                        "output_guard_label": self.trace.output_guard_label,
                         "latency_ms": self.trace.latency_ms,
                         "stage_latencies": self.trace.stage_latencies,
                         "estimated_cost_usd": self.trace.estimated_cost_usd,
@@ -511,6 +532,7 @@ class ChatAgent:
                         "itinerary_emitted": itinerary_emitted,
                         "itinerary_days": itinerary_days,
                         "itinerary_validation_error": itinerary_validation_error,
+                        "output_guard_label": self.trace.output_guard_label,
                         "latency_ms": self.trace.latency_ms,
                         "stage_latencies": self.trace.stage_latencies,
                         "estimated_cost_usd": self.trace.estimated_cost_usd,

@@ -33,6 +33,10 @@ Public scorers:
     grounded in the retrieved context — no contradictions, no fabricated
     specifics (prices, hours, names)? The hallucination guard for a travel
     app where invented details are a real user harm.
+  - `output_guardrail` — LLM-as-judge (Haiku). Offline calibration scorer
+    for the production output guardrail (`app/domain/output_guard.py`).
+    Checks whether the judge correctly classifies replies as "safe" or
+    "review" (system-prompt leaks, harmful content, severe off-topic).
 
 Naming: scorers are referenced by these slugs in the Braintrust UI when
 configuring online scoring rules, so don't rename without updating the
@@ -447,3 +451,60 @@ def answer_faithfulness(
     return _faithfulness_scorer(
         output=answer, input={"message": message, "context": context}
     )
+
+
+# ---------------------------------------------------------------------- #
+# output_guardrail — offline calibration for the production guard        #
+# ---------------------------------------------------------------------- #
+
+# Lazy-built on first call — autoevals is an optional dev dependency.
+_output_guardrail_scorer: Any = None
+
+
+def _build_output_guardrail() -> Any:
+    """Construct the output guardrail LLMClassifier on first call.
+
+    Loads the production prompt from the registry so the eval template stays
+    in sync with what the live guard (`app/domain/output_guard.py`) sends.
+    `use_cot=False`: the classification is binary and the prompt is already
+    unambiguous — no chain-of-thought overhead needed in the eval loop.
+    """
+    from autoevals import LLMClassifier
+
+    from app.prompts import get as get_prompt
+
+    system_text = get_prompt("output_guard.system").text
+    # Mustache template: {{output}} is the assistant reply under review.
+    # We append the REPLY block so the judge sees the same structure as the
+    # production messages.create() call (system sets the rules; user message
+    # is the reply body).
+    template = system_text + "\n\nREPLY:\n{{output}}"
+    return LLMClassifier(
+        name="output_guardrail",
+        prompt_template=template,
+        choice_scores={"SAFE": 1.0, "REVIEW": 0.0},
+        model="claude-haiku-4-5-20251001",
+        use_cot=False,
+    )
+
+
+def output_guardrail(
+    output: Any, input: Any = None, expected: Any = None, **_: Any
+) -> Any:
+    """LLM judge: does the classifier correctly label this reply?
+
+    `output` is the assistant reply string. `expected` should be a dict
+    with a `"label"` key: `{"label": "safe"}` or `{"label": "review"}`.
+
+    Returns 1.0 when the judge's label matches expected, 0.0 otherwise.
+
+    This is the offline calibration suite — it verifies that the judge
+    discriminates correctly across curated fixtures. The production guard
+    (`check_output_guardrail` in `app/domain/output_guard.py`) makes the
+    same Haiku call on every live turn; keeping the template in the shared
+    registry ensures both paths stay in sync.
+    """
+    global _output_guardrail_scorer
+    if _output_guardrail_scorer is None:
+        _output_guardrail_scorer = _build_output_guardrail()
+    return _output_guardrail_scorer(output=output, input=input, expected=expected)

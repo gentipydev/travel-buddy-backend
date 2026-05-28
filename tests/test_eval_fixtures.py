@@ -27,6 +27,7 @@ from app.evals.scorers import _canon, _chunk_is_relevant
 _FIXTURES = Path(__file__).resolve().parents[1] / "evals" / "fixtures"
 _CORPUS = _FIXTURES / "eval_corpus.jsonl"
 _RETRIEVAL = _FIXTURES / "retrieval_quality.jsonl"
+_GUARD = _FIXTURES / "output_guardrail.jsonl"
 
 # The 12 counties (qarqe) of Albania, canonicalized. The corpus stores region
 # as "<County> County"; we strip that suffix and match the canon stem.
@@ -66,6 +67,31 @@ def test_corpus_rows_are_well_formed_and_in_albania():
             assert _county_stem(region) in _ALBANIAN_COUNTIES, (
                 f"{name}: region {region!r} is not a recognized Albanian county"
             )
+
+
+def test_output_guardrail_fixtures_are_valid():
+    """Every output_guardrail.jsonl row is well-formed and has a valid label.
+
+    Guards two invariants:
+      1. Each fixture has a non-empty `input.response` string.
+      2. Each fixture's `expected.label` is exactly "safe" or "review".
+      3. Both classes are represented — the judge can't calibrate if one is absent.
+    """
+    fixtures = _load_jsonl(_GUARD)
+    assert fixtures, "output_guardrail fixtures are empty"
+    labels: set[str] = set()
+    for fx in fixtures:
+        fid = fx.get("id", "<no id>")
+        assert fx.get("input", {}).get("response", "").strip(), (
+            f"{fid}: input.response is empty"
+        )
+        label = fx.get("expected", {}).get("label", "")
+        assert label in {"safe", "review"}, (
+            f"{fid}: expected.label must be 'safe' or 'review', got {label!r}"
+        )
+        labels.add(label)
+    assert "safe" in labels, "no safe fixtures — judge cannot calibrate positive class"
+    assert "review" in labels, "no review fixtures — judge cannot calibrate negative class"
 
 
 def test_every_retrieval_fixture_is_gradeable():
