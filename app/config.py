@@ -37,6 +37,28 @@ class Settings(BaseSettings):
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
+    # Retrieval precision knob: how many reranked chunks reach the prompt.
+    # Raising it trades input tokens for recall (each extra chunk appends its
+    # content to the RAG block in `chat_pipeline`); kept modest so the added
+    # context can't swamp the reply. Tuned against the retrieval eval suite
+    # (`evals/measure_retrieval.py`): at 3 the `vlore-county-recall` pin sits at
+    # rerank rank 5 and is missed; 5 surfaces it (suite hit 0.89→0.95) for ~2
+    # extra chunks/turn. Higher buys nothing on this suite — the remaining miss
+    # (`korce-county-recall`) ranks 10th and is the query-rewrite target instead.
+    rerank_top_n: int = 5
+
+    # LLM query rewrite: when True, `retrieve_chunks` first runs a Haiku pass
+    # that resolves follow-up coreference (using history) and expands broad
+    # queries (e.g. a county into its towns) into specific search terms before
+    # hybrid search + rerank. Off by default on a measured tradeoff
+    # (`evals/measure_retrieval.py`, 2026-05-28): it takes suite hit 0.95→1.00
+    # (fixes `korce-county-recall`, whose chunk reranks last against the bare
+    # query) but is MRR-neutral — over-expansion regresses two already-perfect
+    # precise queries — and adds a serial Haiku call to time-to-first-token on
+    # every retrieval turn. Enable where recall matters more than rank-1
+    # precision / added latency.
+    query_rewrite_enabled: bool = False
+
     # Google Maps Platform — Place Details (photos, rating, address) and
     # Directions (routed polylines) called from services.trip_enrichment.
     # Both `_enabled` flags are kill switches for cost control: setting either

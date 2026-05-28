@@ -151,6 +151,17 @@ PROMPTS: dict[str, Prompt] = {
         notes="Binary SAFE/REVIEW classifier. Checks for system-prompt leaks, "
               "harmful content, and severe off-topic replies.",
     ),
+    # --- Retrieval query rewrite ----------------------------------------
+    # Optional Haiku pass in front of hybrid search: resolves follow-up
+    # coreference and expands broad (county/region) queries into specific
+    # search terms. Short system, runs at most once per retrieval turn; not
+    # cache-eligible.
+    "query_rewrite.system": _make(
+        "query_rewrite.system", "2026-05-28", "query_rewrite/system.md",
+        cache_eligible=False,
+        notes="Rewrites a user question into a retrieval-optimized query "
+              "(coreference resolution + broad-query expansion).",
+    ),
 }
 
 

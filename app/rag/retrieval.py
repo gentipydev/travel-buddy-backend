@@ -1,8 +1,8 @@
 """Adaptive routing + retrieval orchestration for the chat RAG pipeline.
 
 Flow per turn:
-    needs_retrieval(message) → search_chunks(query, history) → rerank_chunks
-                                                              → top_n chunks
+    needs_retrieval(message) → [rewrite_query] → search_chunks → rerank_chunks
+                                                               → top_n chunks
 
 `retrieve_chunks` returns the chunk list (so callers can read place_id for
 the place card); `retrieve_context` is a thin convenience wrapper that joins
@@ -13,9 +13,11 @@ import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.models import Chunk
 from app.observability import stage
 from app.rag.embedding import search_chunks
+from app.rag.query_rewrite import rewrite_query
 from app.rag.reranking import rerank_chunks
 
 logger = logging.getLogger(__name__)
@@ -53,17 +55,29 @@ async def retrieve_chunks(
     """Routing-aware retrieval. Returns ([], None) when retrieval is skipped,
     the embed call fails, or no chunks match — callers should treat empty as
     "no context available" and proceed normally. The float is the top Cohere
-    rerank relevance score, surfaced for telemetry."""
+    rerank relevance score, surfaced for telemetry.
+
+    When `settings.query_rewrite_enabled`, the query is first rewritten by a
+    Haiku pass (coreference + broad-query expansion) and the rewrite drives both
+    hybrid search and reranking; the original `query` is untouched for the model
+    prompt / place card (those don't flow through here). `rerank` keeps the top
+    `settings.rerank_top_n` chunks."""
     if not needs_retrieval(query):
         return [], None
+    search_query = query
+    if settings.query_rewrite_enabled:
+        with stage("rag_query_rewrite"):
+            search_query = await rewrite_query(query, history)
     with stage("rag_retrieval"):
         candidates = await search_chunks(
-            query, db, conversation_history=history
+            search_query, db, conversation_history=history
         )
     if not candidates:
         return [], None
     with stage("rag_rerank"):
-        return await rerank_chunks(query, candidates)
+        return await rerank_chunks(
+            search_query, candidates, top_n=settings.rerank_top_n
+        )
 
 
 async def retrieve_context(
