@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Date, Index, CheckConstraint, UniqueConstraint
+from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Date, Index, CheckConstraint, UniqueConstraint, Computed
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, TSVECTOR
 from sqlalchemy.orm import declarative_base, relationship
 from pgvector.sqlalchemy import Vector
@@ -121,9 +121,27 @@ class Chunk(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     place_id = Column(UUID(as_uuid=True), ForeignKey("places.id", ondelete="CASCADE"), nullable=True, index=True)
     content = Column(String, nullable=False)
+    # Contextual-retrieval header: a short metadata blurb (place name, city,
+    # region/county, category, tags) prepended at index time so structured
+    # metadata that the prose omits is still searchable. Indexed (vector +
+    # lexical) but NOT shown to the model — retrieve_context joins `content`
+    # only. Built by app/rag/contextual.py; see migration 017.
+    context = Column(Text, nullable=True)
     language = Column(String, default="en", index=True)
     source = Column(String)
     embedding = Column(Vector(1024))  # cohere multilingual = 1024 dims
+    # Generated lexical index for hybrid retrieval (migrations 016/017 +
+    # app/rag/embedding.py). Spans context + content so the lexical arm matches
+    # metadata tokens too. `simple` config (no stemming) keeps Albanian proper
+    # nouns intact. Computed → SQLAlchemy treats it read-only, so the chunk
+    # seed/embed scripts never try to write it.
+    search_text = Column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', coalesce(context, '') || ' ' || coalesce(content, ''))",
+            persisted=True,
+        ),
+    )
     meta = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 

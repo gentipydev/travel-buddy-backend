@@ -1,8 +1,10 @@
-"""Embed every Chunk.content via Cohere and store the 1024-dim vector in
-Chunk.embedding. Picks up only chunks where embedding IS NULL, so re-running
-is cheap. `scripts/chunk_places.py` already clears the embedding when its
-content changes, which means re-running this script naturally re-embeds
-edited chunks.
+"""Embed every chunk's contextual text via Cohere and store the 1024-dim vector
+in Chunk.embedding. The embedded text is the contextual-retrieval header plus the
+content (`embedding_input(context, content)` — see app/rag/contextual.py), so the
+vector encodes the place metadata too. Picks up only chunks where embedding IS
+NULL, so re-running is cheap. `scripts/chunk_places.py` already clears the
+embedding when its content or context changes, which means re-running this script
+naturally re-embeds edited chunks.
 
 Usage (from the project root, with COHERE_API_KEY set in .env):
     python -m scripts.embed_chunks
@@ -15,6 +17,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db.engine import async_session
 from app.db.models import Chunk
+from app.rag.contextual import embedding_input
 
 
 BATCH_SIZE = 96  # Cohere embed API accepts up to 96 inputs per call
@@ -45,7 +48,7 @@ async def embed():
                 batch = pending[i : i + BATCH_SIZE]
                 response = await co.embed(
                     model=settings.embedding_model,
-                    texts=[c.content for c in batch],
+                    texts=[embedding_input(c.context, c.content) for c in batch],
                     input_type=INPUT_TYPE,
                     embedding_types=["float"],
                 )

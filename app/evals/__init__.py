@@ -9,17 +9,23 @@ This is the canonical import path — keep scorer names stable, since the
 Braintrust UI's online-scoring rules reference them by these slugs.
 """
 from app.evals.scorers import (
+    answer_faithfulness,
     geo_boundary_adherence,
     itinerary_schema_valid,
     persona_gate,
     refine_fidelity,
+    retrieval_hit_rate,
+    retrieval_mrr,
     stop_count_cap,
 )
 
 __all__ = [
+    "answer_faithfulness",
     "geo_boundary_adherence",
     "itinerary_schema_valid",
     "persona_gate",
     "refine_fidelity",
+    "retrieval_hit_rate",
+    "retrieval_mrr",
     "stop_count_cap",
 ]

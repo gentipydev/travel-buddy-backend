@@ -20,8 +20,19 @@ Public scorers:
     country-bbox check missed it.
   - `refine_fidelity` — deterministic. Verifies that a refine turn only
     mutated the stop UUIDs the instruction implies.
+  - `retrieval_hit_rate` — deterministic. Did the RAG retriever surface a
+    chunk relevant to the query (keyword-grounded) anywhere in its result
+    set? The headline recall metric for the hybrid retriever
+    (`app/rag/embedding.py`).
+  - `retrieval_mrr` — deterministic. Mean reciprocal rank of the first
+    relevant chunk — rewards the reranker for putting the right chunk near
+    the top, not just somewhere in the set.
   - `persona_gate` — LLM-as-judge (Haiku). Did the system correctly
     decide whether to refresh the persona?
+  - `answer_faithfulness` — LLM-as-judge (Haiku). Is the assistant's reply
+    grounded in the retrieved context — no contradictions, no fabricated
+    specifics (prices, hours, names)? The hallucination guard for a travel
+    app where invented details are a real user harm.
 
 Naming: scorers are referenced by these slugs in the Braintrust UI when
 configuring online scoring rules, so don't rename without updating the
@@ -218,6 +229,63 @@ def refine_fidelity(
     }
 
 
+def _chunk_is_relevant(content: str, keywords: list[str]) -> bool:
+    """A chunk is relevant to a row iff ALL of its `relevant_keywords` appear
+    (canonicalized substring) in the chunk content. AND-semantics let an
+    author require a specific chunk ("Theth" + "guesthouse"); a single-keyword
+    row degrades to plain presence. Matching goes through `_canon` so
+    "Gjirokastër" in the fixture matches "gjirokaster" in a chunk."""
+    if not keywords:
+        return False
+    canon_content = _canon(content)
+    return all(_canon(k) in canon_content for k in keywords)
+
+
+def retrieval_hit_rate(output: Any, expected: Any = None, **_: Any) -> float:
+    """1.0 iff at least one retrieved chunk is relevant, else 0.0.
+
+    `output` is the ordered list of retrieved chunk *contents* (the
+    `retrieval_task` runs the live hybrid retriever and returns chunk text —
+    matching by content, not by UUID, keeps fixtures stable across re-seeds).
+    `expected` is `{"relevant_keywords": [...]}`.
+
+    This is the recall metric the hybrid retriever exists to move: a
+    proper-noun query ("Theth") whose chunk the embedding arm misses should
+    still be surfaced by the lexical arm. Abstains (1.0) when a row carries no
+    keywords — same convention as `geo_boundary_adherence`.
+    """
+    if not isinstance(output, list):
+        return 0.0
+    keywords = expected.get("relevant_keywords") if isinstance(expected, dict) else None
+    if not keywords:
+        return 1.0
+    for content in output:
+        if isinstance(content, str) and _chunk_is_relevant(content, keywords):
+            return 1.0
+    return 0.0
+
+
+def retrieval_mrr(output: Any, expected: Any = None, **_: Any) -> float:
+    """Reciprocal rank of the first relevant chunk: 1/rank (1-indexed), 0.0 if
+    none is relevant.
+
+    Distinct from `retrieval_hit_rate`: hit rate only asks "is the right chunk
+    anywhere in the set?", MRR asks "how high did it rank?". A drop in MRR while
+    hit rate holds points at the reranker (`app/rag/reranking.py`) ordering a
+    relevant chunk below an irrelevant one. Abstains (1.0) when a row carries no
+    keywords.
+    """
+    if not isinstance(output, list):
+        return 0.0
+    keywords = expected.get("relevant_keywords") if isinstance(expected, dict) else None
+    if not keywords:
+        return 1.0
+    for rank, content in enumerate(output, start=1):
+        if isinstance(content, str) and _chunk_is_relevant(content, keywords):
+            return 1.0 / rank
+    return 0.0
+
+
 # ---------------------------------------------------------------------- #
 # LLM-as-judge scorers                                                   #
 # ---------------------------------------------------------------------- #
@@ -278,4 +346,104 @@ def persona_gate(
         _persona_gate_scorer = _build_persona_gate()
     return _persona_gate_scorer(
         output=output, input=input, expected=expected, **kwargs
+    )
+
+
+# Lazy-built for the same reason as the persona gate — autoevals is optional.
+_faithfulness_scorer: Any = None
+
+# Eval-only judge prompt (no production equivalent, unlike persona_gate which
+# reuses the live gate prompt), so it lives inline here rather than in the
+# `app/prompts` registry — that registry is for prompts the backend sends to
+# Claude in production. Mustache dotted access (`{{input.context}}`) is
+# supported by autoevals' chevron renderer.
+_FAITHFULNESS_TEMPLATE = """\
+You are a strict fact-checker for an Albania travel assistant.
+
+You are given the REFERENCE CONTEXT the assistant was shown, the USER QUESTION,
+and the assistant's ANSWER. Decide whether the answer is faithful to the
+reference context.
+
+Faithful means:
+- The answer does NOT contradict any fact in the reference context.
+- The answer does NOT invent specific, verifiable details — place names,
+  prices, opening hours, distances, phone numbers, dates — that are absent
+  from the reference context.
+
+General, widely-known statements that are not specific verifiable claims
+(e.g. "Albania uses the lek", "the coast is warm in summer") are acceptable
+even when they do not appear in the context.
+
+REFERENCE CONTEXT:
+{{input.context}}
+
+USER QUESTION:
+{{input.message}}
+
+ANSWER:
+{{output}}
+
+Is the answer faithful to the reference context?
+A = FAITHFUL (no contradictions and no fabricated specifics)
+B = UNFAITHFUL (contradicts the context, or fabricates specific verifiable details)
+"""
+
+
+def _build_faithfulness() -> Any:
+    """Construct the faithfulness LLMClassifier on first call.
+
+    `use_cot=True` (unlike the persona gate): spotting a fabricated price or a
+    subtle contradiction benefits from the judge reasoning before it commits to
+    A/B, and this is an offline eval where the extra Haiku tokens are cheap.
+    """
+    from autoevals import LLMClassifier  # type: ignore[import-not-found]
+
+    return LLMClassifier(
+        name="answer_faithfulness",
+        prompt_template=_FAITHFULNESS_TEMPLATE,
+        choice_scores={"A": 1.0, "B": 0.0},
+        model="claude-haiku-4-5-20251001",
+        use_cot=True,
+    )
+
+
+def answer_faithfulness(
+    output: Any, input: Any = None, **_: Any
+) -> Any:
+    """LLM judge: is the assistant's answer grounded in the retrieved context?
+
+    Returns 1.0 (faithful) / 0.0 (unfaithful). Accepts two input shapes so the
+    same scorer serves both the offline judge-calibration suite and the live
+    system-grounding suite:
+
+      - **calibration** — `output` is the answer string; `input` is
+        `{"message", "context"}` with the context pre-baked in the fixture.
+      - **live** — `output` is `{"answer", "context"}` produced by
+        `faithfulness_live_task` (it retrieves the context at run time); `input`
+        carries just `{"message"}`.
+
+    Either way the underlying judge always sees the same three fields
+    (`message`, `context`, `answer`), so the prompt template stays stable.
+
+    Scope: this catches contradictions and fabricated specifics (prices, hours,
+    names) — the harmful hallucinations for a travel app. It deliberately does
+    NOT require every sentence to be quoted from context, because Travel Buddy
+    blends retrieved chunks with the model's general Albania knowledge; a strict
+    extractive-faithfulness judge would false-positive on legitimate
+    background. The `expected` label in calibration fixtures is for human
+    triage in the Braintrust UI; the judge does not consume it.
+    """
+    message = input.get("message", "") if isinstance(input, dict) else ""
+    if isinstance(output, dict):
+        answer = output.get("answer", "")
+        context = output.get("context", "")
+    else:
+        answer = output if isinstance(output, str) else ""
+        context = input.get("context", "") if isinstance(input, dict) else ""
+
+    global _faithfulness_scorer
+    if _faithfulness_scorer is None:
+        _faithfulness_scorer = _build_faithfulness()
+    return _faithfulness_scorer(
+        output=answer, input={"message": message, "context": context}
     )

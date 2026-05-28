@@ -1,0 +1,4 @@
+{"id": "berat-castle", "input": {"message": "Tell me about Berat castle"}, "_note": "Grounded query; the answer should stay consistent with the seeded Berat Castle chunk and not invent hours/prices."}
+{"id": "theth-access", "input": {"message": "How do I get to Theth?"}, "_note": "Transport query; answer should match the seeded Theth access chunk (road from Shkodër / Valbona hike), not fabricate bus times."}
+{"id": "blue-eye", "input": {"message": "What is the Blue Eye near Sarandë and can I swim there?"}, "_note": "Should reflect that swimming is discouraged (icy, deep) per the seeded chunk rather than inventing facilities."}
+{"id": "furgon-how", "input": {"message": "How do furgons work for getting between towns?"}, "_note": "Domain term; answer should describe shared minibuses leaving when full, cash in lek — no invented timetables."}

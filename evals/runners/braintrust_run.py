@@ -1,9 +1,18 @@
 """Braintrust eval runner for Travel Buddy chat regressions.
 
-Three suites map onto the three categories documented in `evals/README.md`:
+Six suites map onto the categories documented in `evals/README.md`:
   1. itinerary regression — uses `itinerary_schema_valid` + `geo_boundary_adherence`
   2. refine fidelity — uses `refine_fidelity`
   3. persona gate — uses `persona_gate` (LLM-as-judge, Haiku)
+  4. retrieval quality — uses `retrieval_hit_rate` + `retrieval_mrr`
+  5. faithfulness (calibration) — uses `answer_faithfulness` on pre-baked
+     answer/context pairs that validate the judge discriminates
+  6. faithfulness (live) — uses `answer_faithfulness` on real /chat/stream
+     answers grounded against freshly-retrieved context
+
+Suites 4 and 6 hit the live retriever, so they need a `chunks` corpus seeded
+via `python -m evals.seed_eval_db` (the CI workflow seeds an ephemeral
+pgvector container; locally, point DATABASE_URL at a seeded DB).
 
 Local run:
     export BRAINTRUST_API_KEY=...  # same key the backend uses
@@ -31,10 +40,13 @@ from typing import Any
 from braintrust import Eval  # type: ignore[import-not-found]
 
 from app.evals import (
+    answer_faithfulness,
     geo_boundary_adherence,
     itinerary_schema_valid,
     persona_gate,
     refine_fidelity,
+    retrieval_hit_rate,
+    retrieval_mrr,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +111,34 @@ async def _parse_sse_itinerary_event(stream_iter) -> dict[str, Any]:
                     found = {}
                 return found
     return found
+
+
+async def _collect_sse_text(stream_iter) -> str:
+    """Accumulate the assistant's prose reply from a /chat/stream response.
+
+    Plain text deltas arrive as `data: <text>` frames with no `event:` line;
+    structured frames (`event: itinerary`, `event: place_card`, …) and the
+    `data: [DONE]` sentinel are skipped. `encode_sse_text` escapes embedded
+    newlines as additional `data:` lines, so rejoining a frame's data lines
+    with "\\n" reconstructs multi-line text; frames concatenate in order.
+    """
+    buf = b""
+    parts: list[str] = []
+    async for chunk in stream_iter:
+        buf += chunk
+        while b"\n\n" in buf:
+            frame, buf = buf.split(b"\n\n", 1)
+            lines = frame.decode("utf-8", errors="replace").split("\n")
+            if any(line.startswith("event:") for line in lines):
+                continue
+            data = [line[5:].lstrip() for line in lines if line.startswith("data:")]
+            if not data:
+                continue
+            joined = "\n".join(data)
+            if joined.strip() == "[DONE]":
+                continue
+            parts.append(joined)
+    return "".join(parts)
 
 
 async def itinerary_task(input: dict[str, Any]) -> dict[str, Any]:
@@ -174,6 +214,109 @@ async def persona_gate_task(input: dict[str, Any]) -> str:
     return "YES" if should else "NO"
 
 
+async def retrieval_task(input: dict[str, Any]) -> list[str]:
+    """Run the live hybrid retriever and return retrieved chunk contents,
+    ranked. The `retrieval_*` scorers match these against the fixture's
+    `relevant_keywords`.
+
+    Requires a reachable DB seeded with the `chunks` corpus (scripts/
+    `chunk_places.py` → `embed_chunks.py`) plus a Cohere key for the vector
+    arm. When the DB is empty/unreachable (e.g. CI without a seeded Postgres),
+    this returns [] and every retrieval score is 0.0 — the honest
+    "not wired in this environment" signal, same convention as `refine_task`.
+    Run it locally against a seeded dev DB to get real numbers.
+    """
+    message = input.get("message", "")
+    if not message:
+        return []
+    try:
+        from app.db.engine import async_session
+        from app.rag.retrieval import retrieve_chunks
+
+        async with async_session() as db:
+            chunks, _ = await retrieve_chunks(message, db)
+        return [c.content for c in chunks]
+    except Exception:
+        logger.warning(
+            "retrieval_task failed for message=%r (needs a seeded DB + Cohere)",
+            message,
+            exc_info=True,
+        )
+        return []
+
+
+async def faithfulness_task(input: dict[str, Any]) -> str:
+    """Return the answer for the faithfulness JUDGE-CALIBRATION suite.
+
+    Echoes the fixture's pre-baked `answer` so the judge is graded on labeled
+    faithful/unfaithful rows (it should score `faithful` rows ~1.0 and
+    `unfaithful` rows ~0.0). This validates the judge itself; the live suite
+    (`faithfulness_live_task`) grades the real system.
+    """
+    return input.get("answer", "")
+
+
+async def faithfulness_live_task(input: dict[str, Any]) -> dict[str, Any]:
+    """Grade the REAL system: run a /chat/stream turn and pair the streamed
+    answer with the context the retriever surfaces for the same query.
+
+    Returns `{"answer", "context"}`; `answer_faithfulness` reads both from this
+    output (the live shape). The separate `retrieve_context` call reproduces the
+    same hybrid retrieval the chat pipeline runs internally for this query, so
+    the judged context matches what the model was grounded on.
+
+    Requires a seeded `chunks` corpus (see `retrieval_task`) plus an Anthropic
+    key for the chat turn. With no corpus the context is empty and the judge
+    effectively asks "did the answer fabricate specifics?"; with no chat
+    response the answer is empty and the row scores trivially faithful.
+    """
+    message = input.get("message", "")
+    if not message:
+        return {"answer": "", "context": ""}
+
+    context = ""
+    try:
+        from app.db.engine import async_session
+        from app.rag.retrieval import retrieve_context
+
+        async with async_session() as db:
+            context = await retrieve_context(message, db) or ""
+    except Exception:
+        logger.warning(
+            "faithfulness_live_task: retrieval failed for %r (needs seeded DB)",
+            message,
+            exc_info=True,
+        )
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    answer = ""
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            timeout=120.0,
+        ) as client:
+            async with client.stream(
+                "POST", "/chat/stream", json={"message": message}
+            ) as response:
+                if response.status_code == 200:
+                    answer = await _collect_sse_text(response.aiter_bytes())
+                else:
+                    logger.warning(
+                        "faithfulness_live_task: /chat/stream returned %d for %r",
+                        response.status_code, message,
+                    )
+    except Exception:
+        logger.warning(
+            "faithfulness_live_task: chat turn failed for %r", message, exc_info=True
+        )
+
+    return {"answer": answer, "context": context}
+
+
 # ---------------------------------------------------------------------- #
 # Eval definitions                                                       #
 # ---------------------------------------------------------------------- #
@@ -207,6 +350,33 @@ def main() -> None:
         task=persona_gate_task,
         scores=[persona_gate],
         metadata={"suite": "persona-gate"},
+    )
+
+    Eval(
+        "travel-buddy",
+        experiment_name="retrieval-quality",
+        data=lambda: _load_jsonl("retrieval_quality.jsonl"),
+        task=retrieval_task,
+        scores=[retrieval_hit_rate, retrieval_mrr],
+        metadata={"suite": "retrieval-quality"},
+    )
+
+    Eval(
+        "travel-buddy",
+        experiment_name="faithfulness",
+        data=lambda: _load_jsonl("faithfulness.jsonl"),
+        task=faithfulness_task,
+        scores=[answer_faithfulness],
+        metadata={"suite": "faithfulness"},
+    )
+
+    Eval(
+        "travel-buddy",
+        experiment_name="faithfulness-live",
+        data=lambda: _load_jsonl("faithfulness_live.jsonl"),
+        task=faithfulness_live_task,
+        scores=[answer_faithfulness],
+        metadata={"suite": "faithfulness-live"},
     )
 
 

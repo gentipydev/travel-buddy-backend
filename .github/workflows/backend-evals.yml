@@ -12,6 +12,11 @@ name: Backend Evals
 # is owned by the Braintrust UI (Project Settings → Online Scoring):
 # `itinerary_schema_valid` + `geo_boundary_adherence` are fail-on-
 # regression; `refine_fidelity` + `persona_gate` are warn-only.
+# `retrieval_hit_rate` + `retrieval_mrr` now run against a seeded pgvector
+# service (see the seed step below) and produce real numbers — start them
+# warn-only until a baseline is observed, then promote to fail-on-regression.
+# `answer_faithfulness` (calibration + live, LLM-as-judge) stays warn-only
+# while its baseline stabilizes.
 
 on:
   pull_request:
@@ -37,16 +42,32 @@ jobs:
     # Skip the whole job when Braintrust isn't configured — prevents
     # forked-PR builds from failing on missing secrets.
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    # Ephemeral pgvector so the retrieval-quality and faithfulness-live suites
+    # query a real (tiny, seeded) chunks corpus instead of a stub. The seed
+    # step below applies the schema via SQLAlchemy create_all and inserts
+    # evals/fixtures/eval_corpus.jsonl.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: evaldb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
-      # Settings() requires these to instantiate even when the eval is a
-      # no-op skeleton. Placeholder values; the runner's `task` stubs
-      # don't actually hit Anthropic / Cohere / Supabase yet.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
       SUPABASE_URL: https://example.supabase.co
       SUPABASE_ANON_KEY: test-placeholder
       SUPABASE_SERVICE_KEY: test-placeholder
-      DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+      # Points at the pgvector service above. The retrieval / faithfulness-live
+      # tasks open their own session against this; the seed step bootstraps it.
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/evaldb
       ALLOWED_ORIGINS: http://localhost:3000
       GOOGLE_API_KEY: test-placeholder
       LOG_LEVEL: WARNING
@@ -78,6 +99,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Seed eval chunks corpus
+        if: env.skip != 'true'
+        # --bootstrap: CREATE EXTENSION vector + create_all on the fresh
+        # service DB, then insert the eval corpus (embedded via Cohere). The
+        # retrieval / faithfulness-live suites query these rows.
+        run: python -m evals.seed_eval_db --bootstrap
 
       - name: Run Braintrust eval suites
         if: env.skip != 'true'

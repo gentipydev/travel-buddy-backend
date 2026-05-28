@@ -24,7 +24,7 @@ Per turn, the agent:
    `maybe_summarize` block runs before the final `[DONE]` yield, and
    emits `event: persist_failed` on its own failure.
 
-## 2. Retrieval-augmented generation with reranking
+## 2. Hybrid retrieval-augmented generation with reranking
 
 [`app/rag/`](../app/rag/)
 
@@ -34,19 +34,96 @@ and small-talk. False positives just spend one Cohere embed call; false
 negatives leave Claude ungrounded, so the heuristic errs toward
 retrieving.
 
-Embedding ([`embedding.py:search_chunks`](../app/rag/embedding.py))
-prepends the last two assistant turns (each capped at 200 chars) before
-the query so follow-ups like "what about its castle?" stay anchored to
-the previously discussed place. Cohere `embed-multilingual-v3.0` with
-`input_type=search_query` hits a HNSW index on
-`chunks.embedding`.
+Hybrid search ([`embedding.py:search_chunks`](../app/rag/embedding.py))
+runs two retrievers and fuses them:
+
+- **Vector** — Cohere `embed-multilingual-v3.0` with
+  `input_type=search_query` against a HNSW index on `chunks.embedding`.
+  The query is prepended with the last two assistant turns (each capped
+  at 200 chars) so follow-ups like "what about its castle?" stay
+  anchored to the previously discussed place.
+- **Lexical** — a Postgres full-text (`tsvector` / `ts_rank`) lookup
+  against the generated `chunks.search_text` column (migration 016,
+  `simple` config). Catches exact proper-noun matches ("Theth",
+  "Gjirokastër", "furgon") that embedding search routinely misses. The
+  query is built as an **OR of the message's significant terms**
+  (stopwords/short tokens dropped — `embedding.py:_significant_terms`).
+  The earlier `websearch_to_tsquery` ANDed *every* word, so "How do I get
+  to Theth?" became `how & do & i & get & to & theth` and matched
+  nothing — the arm was silently inert for natural-language queries,
+  leaving the "hybrid" retriever effectively vector-only. OR + `ts_rank`
+  (which rewards matching more distinct terms) restores the recall this
+  arm exists for; RRF + the reranker stay the precision filter.
+
+**Contextual retrieval** (migration 017,
+[`contextual.py`](../app/rag/contextual.py)): each chunk carries a
+`context` header templated from its place metadata — e.g. `"Berat — city
+in Berat, Berat County, Albania. Themes: unesco, ottoman, …"`. The header
+is prepended to the embedded text ([`embed_chunks.py`](../scripts/embed_chunks.py))
+and folded into the generated `search_text`, so structured metadata the
+prose omits ("Vlorë County", "beach", "unesco") becomes searchable by
+both arms. It is **not** shown to the model —
+[`retrieval.py:retrieve_context`](../app/rag/retrieval.py) joins `content`
+only. This adapts Anthropic's *Contextual Retrieval* to structured data:
+a deterministic template rather than an LLM call, because each chunk
+already *is* the whole place doc and the missing context is columns we
+own.
+
+The two ranked lists merge with Reciprocal Rank Fusion (RRF, K=60) into
+a single top-`k` candidate pool. Hybrid's job is *recall*; the reranker
+is still the precision filter.
 
 Reranking ([`reranking.py:rerank_chunks`](../app/rag/reranking.py))
-re-scores the top embedding hits with
-`rerank-multilingual-v3.0` and returns the top 3 plus the top
-relevance score. Both calls are fail-soft — any Cohere outage falls
-back to `[]` (chat continues with no retrieved context) or the
-embed-only ordering (no rerank).
+re-scores the fused candidates with `rerank-multilingual-v3.0` and
+returns the top 3 plus the top relevance score.
+
+Fail-soft, layered: a Cohere embed outage degrades to lexical-only (embed
+error caught → `[]`), a FTS error degrades to vector-only, and a rerank
+API error falls back to the fused order. Only an empty fused pool leaves
+Claude with no context.
+
+**Measured** ([`evals/measure_retrieval.py`](../evals/measure_retrieval.py)
+over `retrieval_quality.jsonl`). Two corpora tell two halves of the story.
+
+*Lexical-arm code fix (12-chunk corpus).* Isolating the lexical arm (NULL
+embeddings, reranker live) — the path that carries a freshly-edited-but-
+not-yet-re-embedded chunk, or an embed failure:
+
+| lexical arm (12-chunk) | hit-rate | MRR |
+|---|---|---|
+| `websearch` AND-of-all-terms (before) | 0.00 | 0.00 |
+| OR of significant terms | 0.75 | 0.75 |
+| + contextual header | 1.00 | 0.94 |
+
+On 12 chunks the full vector + lexical + rerank pipeline sat at 1.00 / 0.94
+no matter what: the multilingual embedder already retrieved every chunk, so
+the metric was *saturated* and blind to any retrieval change. The lexical
+fix still mattered (the arm went from *inert* to *functional*, the fail-soft
+path from 0 to full recall) — it just couldn't be seen in the headline
+number.
+
+*Corpus growth to un-saturate (30-chunk corpus).* To make the metric able to
+move — the prerequisite for measuring any future retrieval change and for
+promoting these scorers to fail-on-regression — the eval corpus was grown to
+30 chunks built around **confusable clusters** (5 castles, 6 Ionian beaches,
+two distinct "Blue Eye" springs, …) with fixtures that pin one chunk among
+its lookalikes. Measured 2026-05-28, reranker live:
+
+| 30-chunk corpus | hit-rate | MRR |
+|---|---|---|
+| full vector + lexical + rerank | 0.89 | 0.895 |
+| lexical arm only (NULL embeddings) | 0.95 | 0.921 |
+
+The ceiling is gone. The remaining gap is two header-only county-recall
+fixtures, and the failures are instructive rather than cosmetic:
+`korce-county-recall` retrieves the right chunk (Lake Ohrid lands in the
+fused top-10) but the reranker drops it below `top_n=3`; `vlore-county-recall`'s
+pinned chunk is crowded out of the candidate pool by its nine Vlorë-County
+siblings under the full pipeline, yet the lexical arm alone still surfaces it
+at rank 2 (hit 1.00 / MRR 0.50). That arm-level divergence — vector + rerank
+scoring *lower* than lexical alone on one query — is exactly the signal a
+saturated corpus hides. Both are left red as headroom targets for query
+rewrite (#3) and reranker / `top_n` tuning.
 
 The retrieved context lands in the system prompt's **volatile suffix**
 (see Prompt Caching below) so chunks differ per query without
