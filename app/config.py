@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
+    # Cohere trial keys are capped at 10 requests/minute across embed + rerank
+    # combined. Bursting past it returns 429s, and the RAG layer's fail-soft
+    # (embed → lexical-only, rerank → passthrough) would then silently corrupt
+    # result quality with no error surfaced. A per-process token-bucket throttle
+    # around both Cohere calls keeps bursts under the ceiling; raise this for a
+    # production (non-trial) key. `cohere_rate_limit_window_seconds` is the
+    # refill window the limit applies over (60s = "per minute").
+    cohere_rate_limit_per_minute: int = 10
+    cohere_rate_limit_window_seconds: float = 60.0
+
     # Retrieval precision knob: how many reranked chunks reach the prompt.
     # Raising it trades input tokens for recall (each extra chunk appends its
     # content to the RAG block in `chat_pipeline`); kept modest so the added

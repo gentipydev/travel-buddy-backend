@@ -10,9 +10,12 @@ score, so chat continues with embed-only ranking.
 import logging
 import time
 
+import cohere
+
 from app.config import settings
 from app.db.models import Chunk
 from app.integrations.cohere_client import get_cohere
+from app.rag.cohere_throttle import cohere_limiter, note_rate_limited
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +43,21 @@ async def rerank_chunks(
         # it inside the try so a missing key degrades to embed-only order
         # instead of crashing the whole chat turn.
         co = get_cohere()
+        # Pace under the trial-key 10/min ceiling (shared with embed) so a
+        # burst can't trip a 429 that the passthrough fallback would swallow.
+        await cohere_limiter.acquire()
         response = await co.rerank(
             model=settings.rerank_model,
             query=query,
             documents=[c.content for c in chunks],
             top_n=min(top_n, len(chunks)),
         )
+    except cohere.TooManyRequestsError:
+        note_rate_limited()
+        logger.warning(
+            "Cohere rerank rate-limited (429) — falling back to embed-only order"
+        )
+        return chunks[:top_n], None
     except Exception:
         logger.exception("Cohere rerank failed; falling back to embed-only order")
         return chunks[:top_n], None

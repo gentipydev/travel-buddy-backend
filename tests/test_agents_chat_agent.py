@@ -13,6 +13,7 @@ fields landed on `self.trace`.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -608,3 +609,53 @@ async def test_chat_agent_emit_itinerary_cassette_emits_itinerary_event(
     assert trace.itinerary_days == 2
     # Cache tokens flow through unchanged from the cassette.
     assert trace.cache_read_input_tokens == 3120
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream cancellation: client disconnects while the stream is running.
+# ---------------------------------------------------------------------------
+
+
+async def test_midstream_cancellederror_propagates_not_swallowed(
+    monkeypatch, fake_db,
+):
+    """A client disconnect cancels the still-running generator at its next
+    await. In Python 3.12 that injects `asyncio.CancelledError` — a
+    BaseException, NOT an `Exception` — so the agent's outer `except Exception`
+    must NOT catch it.
+
+    This is the safety basis for the persist-before-[DONE] invariant: if a
+    cancel could be swallowed and turned into a normal return (or an
+    `event: error` frame), a post-[DONE] write could silently be skipped.
+    Here we throw the cancel mid-text-stream and assert it surfaces unchanged
+    — no `event: error` frame, no clean completion."""
+    monkeypatch.setattr(
+        chat_agent_module,
+        "client",
+        _fake_client(
+            text_chunks=["first ", "second ", "third"],
+            final_message=_final_message(
+                content=[_text_block("first second third")]
+            ),
+        ),
+    )
+
+    agent = ChatAgent(
+        db=fake_db,
+        request=ChatRequest(message="hello"),
+        ctx=_ctx(),
+        user_id=None,
+        trace=_new_trace(),
+        started_at=0.0,
+    )
+    gen = agent.stream()
+    # Pull the first frame so the generator is suspended at a text-stream
+    # yield (no conversation_id / place_card on the default ctx, so the first
+    # yield is a text data frame).
+    first = await gen.__anext__()
+    assert first.startswith("data: ")
+
+    # Simulate Starlette cancelling the generator mid-stream. The cancel must
+    # propagate out of athrow rather than being converted to a yielded frame.
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())

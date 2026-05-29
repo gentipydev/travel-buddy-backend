@@ -12,8 +12,11 @@ import pytest
 from app.db.models import Chunk
 from app.rag import embedding as embedding_module
 from app.rag.embedding import (
+    _MEMORY_CHAR_CAP,
+    _build_embed_input,
     _reciprocal_rank_fusion,
     _significant_terms,
+    reciprocal_rank_fusion_scores,
     search_chunks,
 )
 
@@ -202,3 +205,93 @@ async def test_lexical_failure_degrades_to_vector_only(monkeypatch):
     fused = await search_chunks("Berat", _SecondCallFailsSession(vector_hits))
 
     assert [c.id for c in fused] == [vector_hits[0].id]
+
+
+# ---------------------------------------------------------------------- #
+# reciprocal_rank_fusion_scores (pure, standalone — item B8)             #
+# ---------------------------------------------------------------------- #
+
+
+def test_rrf_scores_pure_known_inputs_default_k():
+    """Single list, two items: rank-0 scores 1/(60+1), rank-1 scores 1/(60+2)."""
+    scores = reciprocal_rank_fusion_scores([["a", "b"]])
+    assert scores["a"] == pytest.approx(1.0 / 61)
+    assert scores["b"] == pytest.approx(1.0 / 62)
+    assert scores["a"] > scores["b"]
+
+
+def test_rrf_scores_accumulate_across_lists():
+    """A key present in both lists sums its per-list contributions."""
+    scores = reciprocal_rank_fusion_scores([["x", "y"], ["x", "z"]])
+    # x: rank0 in both → 2 × 1/61. y: rank1 list0. z: rank1 list1.
+    assert scores["x"] == pytest.approx(2.0 / 61)
+    assert scores["y"] == pytest.approx(1.0 / 62)
+    assert scores["x"] > scores["y"]
+    assert scores["x"] > scores["z"]
+
+
+def test_rrf_scores_custom_k_changes_damping():
+    """A smaller k sharpens the top-rank advantage; larger k flattens it."""
+    sharp = reciprocal_rank_fusion_scores([["a", "b"]], k=1)
+    flat = reciprocal_rank_fusion_scores([["a", "b"]], k=1000)
+    sharp_gap = sharp["a"] - sharp["b"]
+    flat_gap = flat["a"] - flat["b"]
+    assert sharp_gap > flat_gap
+
+
+def test_rrf_scores_empty_input_returns_empty_dict():
+    assert reciprocal_rank_fusion_scores([]) == {}
+    assert reciprocal_rank_fusion_scores([[], []]) == {}
+
+
+def test_chunk_rrf_delegates_to_pure_scorer():
+    """The Chunk-aware wrapper preserves the ordering the pure scorer implies:
+    a chunk first in both arms outranks one in a single arm."""
+    shared, vec_only, lex_only = _chunk("s"), _chunk("v"), _chunk("l")
+    fused = _reciprocal_rank_fusion(
+        [[vec_only, shared], [lex_only, shared]], top_k=10
+    )
+    assert fused[0] is shared
+
+
+# ---------------------------------------------------------------------- #
+# _build_embed_input + _MEMORY_CHAR_CAP truncation                       #
+# ---------------------------------------------------------------------- #
+
+
+def test_build_embed_input_no_history_returns_query_unchanged():
+    assert _build_embed_input("Where is Theth?", None) == "Where is Theth?"
+    assert _build_embed_input("Where is Theth?", []) == "Where is Theth?"
+
+
+def test_build_embed_input_prepends_last_two_assistants_most_recent_first():
+    history = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "first"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "second"},
+    ]
+    # Most recent assistant ("second") leads, then "first", then the query.
+    assert _build_embed_input("query", history) == "second first query"
+
+
+def test_build_embed_input_truncates_each_prepended_message_to_cap():
+    long_msg = "x" * (_MEMORY_CHAR_CAP + 500)
+    history = [{"role": "assistant", "content": long_msg}]
+    out = _build_embed_input("q", history)
+    # The prepended message is capped; total = cap chars + " q".
+    assert out == ("x" * _MEMORY_CHAR_CAP) + " q"
+    assert len(out.split(" q")[0]) == _MEMORY_CHAR_CAP
+
+
+def test_build_embed_input_skips_non_string_assistant_content():
+    history = [
+        {"role": "assistant", "content": [{"type": "image"}]},  # multimodal
+        {"role": "assistant", "content": "text reply"},
+    ]
+    assert _build_embed_input("q", history) == "text reply q"
+
+
+def test_build_embed_input_no_assistant_messages_returns_query():
+    history = [{"role": "user", "content": "just a user turn"}]
+    assert _build_embed_input("q", history) == "q"

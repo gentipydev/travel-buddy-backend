@@ -25,12 +25,14 @@ import logging
 import re
 import time
 
+import cohere
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import Chunk
 from app.integrations.cohere_client import get_cohere
+from app.rag.cohere_throttle import cohere_limiter, note_rate_limited
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +91,20 @@ async def _vector_search(
         # raises RuntimeError) degrades to lexical-only just like an embed
         # API failure does — the whole point of the hybrid fallback.
         co = get_cohere()
+        # Pace under the trial-key 10/min ceiling so a burst can't trip a 429
+        # that the fail-soft fallback would otherwise swallow silently.
+        await cohere_limiter.acquire()
         response = await co.embed(
             model=settings.embedding_model,
             texts=[embed_input],
             input_type="search_query",
             embedding_types=["float"],
         )
+    except cohere.TooManyRequestsError:
+        # Count it before failing soft so the spike is visible in telemetry.
+        note_rate_limited()
+        logger.warning("Cohere embed rate-limited (429) — degrading to lexical-only")
+        return []
     except Exception:
         logger.exception("Cohere embed failed")
         return []
@@ -211,21 +221,44 @@ async def _lexical_search(
     return chunks
 
 
+def reciprocal_rank_fusion_scores(
+    ranked_key_lists: list[list], *, k: int = _RRF_K
+) -> dict:
+    """Pure RRF over opaque, hashable keys: score(key) = Σ 1/(k + rank_i).
+
+    No I/O, no Chunk dependency — takes ranked lists of any hashable key
+    (chunk id, doc id, string) and returns `{key: fused_score}`. `rank_i`
+    is 0-based per list, so a key ranked first in a list contributes
+    `1/(k+1)`. A key appearing in multiple lists accumulates across them,
+    which is the recall win hybrid retrieval is after. `k` damps the
+    contribution of any single list's top rank (Cormack et al. default 60).
+
+    Extracted so the fusion math is unit-testable in isolation from the
+    embedding pipeline; `_reciprocal_rank_fusion` is the Chunk-aware caller.
+    """
+    scores: dict = {}
+    for keys in ranked_key_lists:
+        for rank, key in enumerate(keys):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+    return scores
+
+
 def _reciprocal_rank_fusion(
     ranked_lists: list[list[Chunk]], *, top_k: int
 ) -> list[Chunk]:
-    """Merge ranked Chunk lists via RRF: score(c) = Σ 1/(K + rank_i).
+    """Merge ranked Chunk lists via RRF and return the top_k chunks.
 
-    Dedups by `Chunk.id` (keeping the first-seen instance) and returns the
-    top_k by fused score. A chunk that ranks well in both arms outscores one
-    that only appears in a single arm, which is exactly the recall win hybrid
-    is after.
+    Delegates the score math to the pure `reciprocal_rank_fusion_scores`,
+    then dedups by `Chunk.id` (keeping the first-seen instance) and returns
+    the top_k by fused score. A chunk that ranks well in both arms outscores
+    one that only appears in a single arm.
     """
-    scores: dict = {}
+    scores = reciprocal_rank_fusion_scores(
+        [[c.id for c in chunks] for chunks in ranked_lists], k=_RRF_K
+    )
     chunk_by_id: dict = {}
     for chunks in ranked_lists:
-        for rank, chunk in enumerate(chunks):
-            scores[chunk.id] = scores.get(chunk.id, 0.0) + 1.0 / (_RRF_K + rank + 1)
+        for chunk in chunks:
             chunk_by_id.setdefault(chunk.id, chunk)
     ranked = sorted(
         chunk_by_id.values(), key=lambda c: scores[c.id], reverse=True

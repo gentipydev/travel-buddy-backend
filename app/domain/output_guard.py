@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.config import settings
+from app.observability.request_context import trace_var
 from app.prompts import get as get_prompt
 
 if TYPE_CHECKING:
@@ -23,6 +24,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _GUARD_TIMEOUT_SECONDS = 5.0
+
+
+def _mark_failed_open() -> None:
+    """Flag the ambient RequestTrace so a fail-open is no longer invisible.
+
+    No-op when no trace is bound (e.g. unit tests that call the guard
+    directly) — mirrors the `app.observability.stage()` helper's contract.
+    Never raises: telemetry must not break the fail-open path.
+    """
+    try:
+        trace = trace_var.get()
+        if trace is not None:
+            trace.output_guard_failed_open = True
+    except Exception:
+        pass
 
 
 async def check_output_guardrail(text: str, *, client: AsyncAnthropic) -> str:
@@ -53,11 +69,13 @@ async def check_output_guardrail(text: str, *, client: AsyncAnthropic) -> str:
         ).strip().upper()
         return "review" if label_raw == "REVIEW" else "safe"
     except TimeoutError:
+        _mark_failed_open()
         logger.warning(
             "output_guardrail: Haiku call timed out after %.1fs — fail open",
             _GUARD_TIMEOUT_SECONDS,
         )
         return "safe"
     except Exception:
+        _mark_failed_open()
         logger.warning("output_guardrail: exception — fail open", exc_info=True)
         return "safe"

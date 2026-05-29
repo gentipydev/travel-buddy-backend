@@ -10,9 +10,40 @@ wiring without a DB or network:
 import pytest
 
 from app.rag import retrieval as retrieval_module
-from app.rag.retrieval import retrieve_chunks
+from app.rag.retrieval import needs_retrieval, retrieve_chunks, retrieve_context
 
 pytestmark = pytest.mark.anyio
+
+
+# --------------------------------------------------------------------------- #
+# needs_retrieval routing (greetings / thanks / yes-no skip)                   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "hi", "hello", "Hey!", "thanks", "thank you", "Thank you.",
+        "bye", "ok", "okay", "yes", "no", "sure", "great", "cool",
+        "good morning", "Good evening!", "", "   ",
+    ],
+)
+def test_needs_retrieval_skips_non_informational(msg):
+    assert needs_retrieval(msg) is False
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "Tell me about Theth",
+        "Berat or Gjirokastër?",
+        "What can I see in Vlorë?",
+        "thanks for the tip, where is the castle?",  # not a pure thanks token
+        "no buses to Theth?",  # informational despite leading "no"
+    ],
+)
+def test_needs_retrieval_fires_for_informational(msg):
+    assert needs_retrieval(msg) is True
 
 
 def _wire(monkeypatch, *, candidates=None):
@@ -89,3 +120,27 @@ async def test_no_candidates_returns_empty_without_rerank(monkeypatch):
     chunks, score = await retrieve_chunks("Anything in Shkodër?", db=None)
     assert chunks == []
     assert score is None
+
+
+async def test_retrieve_context_returns_none_when_both_arms_empty(monkeypatch):
+    """When search yields nothing (both arms empty / Cohere down + no lexical),
+    retrieve_context returns None so the caller proceeds ungrounded — not "" or
+    a crash."""
+    monkeypatch.setattr(retrieval_module.settings, "query_rewrite_enabled", False)
+    _wire(monkeypatch, candidates=[])
+    ctx = await retrieve_context("Anything in Pogradec?", db=None)
+    assert ctx is None
+
+
+async def test_retrieve_context_joins_chunk_contents(monkeypatch):
+    """When chunks come back, retrieve_context joins their contents with the
+    document separator."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(retrieval_module.settings, "query_rewrite_enabled", False)
+    monkeypatch.setattr(retrieval_module.settings, "rerank_top_n", 2)
+    c1 = SimpleNamespace(content="Berat is a UNESCO town.")
+    c2 = SimpleNamespace(content="Gjirokastër has a stone castle.")
+    _wire(monkeypatch, candidates=[c1, c2])
+    ctx = await retrieve_context("Tell me about Berat and Gjirokastër", db=None)
+    assert ctx == "Berat is a UNESCO town.\n\n---\n\nGjirokastër has a stone castle."

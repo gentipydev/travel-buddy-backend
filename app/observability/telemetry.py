@@ -54,6 +54,14 @@ class RequestTrace:
     # Cache hit rate = cache_read / (cache_read + cache_creation + input).
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    # Derived prompt-cache hit ratio:
+    #   cache_read / (cache_read + cache_creation + input)
+    # Computed by `log_trace` just before emit (guards divide-by-zero →
+    # None). None until then, and None whenever the denominator is 0 or the
+    # token counts are missing (caching disabled / fallback path). Lets a
+    # dashboard track cache effectiveness directly instead of re-deriving it
+    # from three separate token fields on every trace line.
+    cache_hit_ratio: float | None = None
     # Per-stage elapsed seconds, populated by `stage()` (this class) or the
     # module-level `stage()` helper in `app/observability/__init__.py`.
     # Repeated stage names sum (e.g. two RAG calls in one turn). Nested
@@ -68,6 +76,12 @@ class RequestTrace:
     # guardrail was skipped (empty assistant text) or the guard call failed
     # (fail-open — not an error, just no signal for this turn).
     output_guard_label: str | None = None
+    # True when the output guard returned "safe" because the Haiku call
+    # timed out or errored (fail-open), NOT because the reply was judged
+    # safe. Without this flag a guard outage is invisible — every fail-open
+    # turn looks identical to a genuinely-safe one. Dashboards alert on a
+    # spike here to catch a silently-degraded guardrail.
+    output_guard_failed_open: bool = False
 
     @contextmanager
     def stage(self, name: str):
@@ -81,9 +95,27 @@ class RequestTrace:
             )
 
 
+def _compute_cache_hit_ratio(trace: RequestTrace) -> float | None:
+    """cache_read / (cache_read + cache_creation + input), or None.
+
+    Returns None when any token count is missing (caching disabled / a
+    fallback path) or the denominator is 0 — never divides by zero.
+    """
+    read = trace.cache_read_input_tokens
+    creation = trace.cache_creation_input_tokens
+    inp = trace.input_tokens
+    if read is None or creation is None or inp is None:
+        return None
+    denom = read + creation + inp
+    if denom <= 0:
+        return None
+    return read / denom
+
+
 def log_trace(trace: RequestTrace) -> None:
     """Emit `trace` as a single JSON line at INFO. Never raises."""
     try:
+        trace.cache_hit_ratio = _compute_cache_hit_ratio(trace)
         logger.info(json.dumps(asdict(trace)))
     except Exception:
         try:
