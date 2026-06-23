@@ -6,6 +6,7 @@ DB layer is a `FakeSession` that returns scripted SELECT results.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -303,28 +304,33 @@ async def test_cache_returns_additional_photos_from_jsonb(
 async def test_fresh_resolves_multiple_photo_refs(
     fake_db, mock_http, monkeypatch
 ):
-    """When Google Place Details returns multiple `photo_reference`s,
-    `_resolve_photos` redirects each through `/place/photo` and the
+    """When Place Details (New) returns multiple photo resource `name`s,
+    `_resolve_photos` resolves each via the Photo Media endpoint and the
     enrichment result returns the first as `photo_url` and the rest as
     `additional_photos`."""
     _stub_settings(monkeypatch)
     fake_db.queue(None)   # curated miss
     fake_db.queue(None)   # cache miss
 
-    mock_http.on(
-        GOOGLE_DETAILS_URL,
-        lambda req: _details_response(["refA", "refB", "refC"]),
-    )
-    # Each photo redirect resolves to a unique target — order matches the
-    # order of the photo_reference list (Google preserves it).
+    # Each photo media call resolves to a unique target — order matches the
+    # order of the photo `name` list (Google preserves it).
     photo_targets = iter([
         "https://lh3.googleusercontent.example/A.jpg",
         "https://lh3.googleusercontent.example/B.jpg",
         "https://lh3.googleusercontent.example/C.jpg",
     ])
+    # Register photo (more specific prefix) before details.
     mock_http.on(
         GOOGLE_PHOTO_URL,
-        lambda req: _photo_redirect(next(photo_targets)),
+        lambda req: _photo_media(next(photo_targets)),
+    )
+    mock_http.on(
+        GOOGLE_DETAILS_URL,
+        lambda req: _details_response([
+            "places/ChIJtest/photos/refA",
+            "places/ChIJtest/photos/refB",
+            "places/ChIJtest/photos/refC",
+        ]),
     )
 
     result = await enrich_stop(fake_db, "ChIJtest")
@@ -345,16 +351,14 @@ def _textsearch_response(
     lat: float = 41.3275,
     lng: float = 19.8187,
 ) -> httpx.Response:
+    # searchText (New): results nested under `places`, camelCase `location`.
     return httpx.Response(
         200,
         json={
-            "status": "OK",
-            "results": [
+            "places": [
                 {
-                    "place_id": place_id,
-                    "name": "Skanderbeg Square",
-                    "formatted_address": "Skanderbeg Square, Tirana, Albania",
-                    "geometry": {"location": {"lat": lat, "lng": lng}},
+                    "id": place_id,
+                    "location": {"latitude": lat, "longitude": lng},
                 }
             ],
         },
@@ -370,12 +374,12 @@ async def test_textsearch_happy_path(mock_http, monkeypatch):
     )
 
     assert result == ("ChIJsk_text", 41.3275, 19.8187)
-    # Query string combines name + city + "Albania" so an ambiguous English
-    # name can't drift to a same-named locality elsewhere. `region=al` is a
-    # ranking bias; the bbox post-filter is the hard guard.
-    url = str(mock_http.requests[0].url)
-    assert "Skanderbeg%20Square%2C%20Tirana%2C%20Albania" in url
-    assert "region=al" in url
+    # The POST body's textQuery combines name + city + "Albania" so an
+    # ambiguous English name can't drift to a same-named locality elsewhere.
+    # `regionCode=AL` is a ranking bias; the bbox post-filter is the hard guard.
+    body = json.loads(mock_http.requests[0].content)
+    assert body["textQuery"] == "Skanderbeg Square, Tirana, Albania"
+    assert body["regionCode"] == "AL"
 
 
 async def test_textsearch_no_city_still_includes_albania(mock_http, monkeypatch):
@@ -385,9 +389,9 @@ async def test_textsearch_no_city_still_includes_albania(mock_http, monkeypatch)
     result = await find_place_id_by_name(name="Skanderbeg Square")
 
     assert result == ("ChIJsk_text", 41.3275, 19.8187)
-    url = str(mock_http.requests[0].url)
-    assert "Skanderbeg%20Square%2C%20Albania" in url
-    assert "region=al" in url
+    body = json.loads(mock_http.requests[0].content)
+    assert body["textQuery"] == "Skanderbeg Square, Albania"
+    assert body["regionCode"] == "AL"
 
 
 async def test_textsearch_drops_out_of_bounds_result(
@@ -405,7 +409,7 @@ async def test_textsearch_drops_out_of_bounds_result(
         ),
     )
 
-    with caplog.at_level(logging.WARNING, logger="app.services.google_places"):
+    with caplog.at_level(logging.WARNING, logger="app.integrations.google_places"):
         result = await find_place_id_by_name(
             name="Mediterranean Cafe", city="Tirana"
         )
@@ -431,17 +435,14 @@ async def test_fetch_and_cache_drops_out_of_bounds_geometry(
         return httpx.Response(
             200,
             json={
-                "status": "OK",
-                "result": {
-                    "place_id": "ChIJus",
-                    "name": "Tirana Restaurant",
-                    "formatted_address": "123 Main St, Brooklyn, NY",
-                    "geometry": {"location": {"lat": 40.65, "lng": -73.95}},
-                    "rating": 4.4,
-                    "user_ratings_total": 200,
-                    "photos": [],
-                    "types": ["restaurant"],
-                },
+                "id": "ChIJus",
+                "displayName": {"text": "Tirana Restaurant"},
+                "formattedAddress": "123 Main St, Brooklyn, NY",
+                "location": {"latitude": 40.65, "longitude": -73.95},
+                "rating": 4.4,
+                "userRatingCount": 200,
+                "photos": [],
+                "types": ["restaurant"],
             },
         )
 
@@ -457,11 +458,10 @@ async def test_fetch_and_cache_drops_out_of_bounds_geometry(
 
 async def test_textsearch_zero_results_returns_none(mock_http, monkeypatch):
     _stub_settings(monkeypatch)
+    # searchText (New) omits `places` entirely when there are no matches.
     mock_http.on(
         GOOGLE_TEXTSEARCH_URL,
-        lambda req: httpx.Response(
-            200, json={"status": "ZERO_RESULTS", "results": []}
-        ),
+        lambda req: httpx.Response(200, json={}),
     )
 
     result = await find_place_id_by_name(name="Nonexistent Place")
@@ -500,14 +500,12 @@ async def test_textsearch_http_error_returns_none(mock_http, monkeypatch):
 
 async def test_textsearch_drops_result_without_geometry(mock_http, monkeypatch):
     _stub_settings(monkeypatch)
+    # A place with an id but no `location` — can't place a marker, so dropped.
     mock_http.on(
         GOOGLE_TEXTSEARCH_URL,
         lambda req: httpx.Response(
             200,
-            json={
-                "status": "OK",
-                "results": [{"place_id": "ChIJnogeo", "name": "x"}],
-            },
+            json={"places": [{"id": "ChIJnogeo"}]},
         ),
     )
 

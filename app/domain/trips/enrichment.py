@@ -24,8 +24,9 @@ import asyncio
 import logging
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -344,3 +345,92 @@ def _build_static_map(
         markers_by_day=markers_by_day,
         polylines=polylines,
     )
+
+
+async def geocode_itinerary_preview(db: AsyncSession, payload: dict) -> dict:
+    """Geocode a draft itinerary WITHOUT persisting it, for the live map.
+
+    Used by `/chat/stream` to light up the map the moment Claude emits an
+    itinerary, before (and independent of) any "Save". Builds transient ORM
+    objects from the validated `emit_itinerary` payload, runs the same
+    `_enrich_places` resolution every saved trip goes through (Google Places
+    text-search → google_place_id + lat/lng, plus photos/rating/address),
+    and serializes the result into the canonical `TripOut` shape.
+
+    Two deliberate departures from `enrich_trip`:
+      - Nothing touches the session/DB beyond cache reads — no trip row, so
+        no impact on the per-user trip limit, and anonymous users work too.
+      - Directions are skipped (`routes: []`). The client falls back to a
+        straight dashed connector between stops; the road-following polyline
+        and static map are computed on Save. Most previews are never saved,
+        so firing Directions per draft would be wasted spend.
+
+    Never raises on enrichment failure internally (mirrors `_enrich_places`,
+    which logs and continues); the caller wraps this best-effort regardless.
+    """
+    now = datetime.now(timezone.utc)
+    trip = Trip(
+        id=uuid4(),
+        title=payload.get("title") or "Trip",
+        summary=payload.get("summary"),
+        static_map_url=None,
+        created_at=now,
+        updated_at=now,
+    )
+    # start_date arrives as an ISO date string in the wire payload; keep the
+    # _serialize contract (it calls `.isoformat()`), so parse to a date.
+    start_date = payload.get("start_date")
+    if isinstance(start_date, str) and start_date:
+        try:
+            trip.start_date = datetime.fromisoformat(start_date).date()
+        except ValueError:
+            trip.start_date = None
+    else:
+        trip.start_date = None
+
+    days: list[TripDay] = []
+    for day_payload in payload.get("days", []):
+        day = TripDay(
+            id=uuid4(),
+            day_number=day_payload.get("day_number"),
+            title=day_payload.get("title"),
+            base_city=day_payload.get("base_city"),
+        )
+        stops: list[TripStop] = []
+        for index, stop_payload in enumerate(day_payload.get("stops", [])):
+            stops.append(
+                TripStop(
+                    id=uuid4(),
+                    sort_order=index,
+                    name=stop_payload.get("name"),
+                    kind=stop_payload.get("kind"),
+                    city=stop_payload.get("city"),
+                    address=stop_payload.get("address"),
+                    duration_minutes=stop_payload.get("duration_minutes"),
+                    arrival_time=stop_payload.get("arrival_time"),
+                    end_time=stop_payload.get("end_time"),
+                    transportation=stop_payload.get("transportation"),
+                    notes=stop_payload.get("notes"),
+                    lat=stop_payload.get("lat"),
+                    lng=stop_payload.get("lng"),
+                    google_place_id=stop_payload.get("google_place_id"),
+                    photos=[],
+                )
+            )
+        day.stops = stops
+        days.append(day)
+    trip.days = days
+    trip.routes = []
+
+    flat_stops = [stop for day in trip.days for stop in day.stops]
+    if flat_stops:
+        try:
+            await _enrich_places(db, flat_stops)
+        except Exception:
+            logger.exception("geocode_itinerary_preview phase=places")
+
+    # Local import dodges the repository ↔ enrichment cycle (repository
+    # already imports this module lazily).
+    from app.domain.trips.repository import _serialize
+
+    return _serialize(trip)

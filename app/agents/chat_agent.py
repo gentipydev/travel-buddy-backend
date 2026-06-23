@@ -34,6 +34,7 @@ from app.domain.conversations import (
     maybe_summarize,
 )
 from app.domain.output_guard import check_output_guardrail
+from app.domain.trips.enrichment import geocode_itinerary_preview
 from app.domain.trips.mutations import replace_trip_from_payload
 from app.domain.trips.repository import serialize_trip
 from app.domain.usage_budget import (
@@ -162,6 +163,9 @@ class ChatAgent:
         itinerary_emitted: bool = False
         itinerary_days: int | None = None
         itinerary_validation_error: str | None = None
+        # Validated emit_itinerary payload, set on the initial-creation path
+        # so we can geocode + emit a live map preview after the stream closes.
+        itinerary_preview_payload: dict | None = None
         # Tool names Claude fired this turn — empty for plain chat,
         # `["emit_itinerary"]` for whole-trip create, one or more
         # `update_stop` / `insert_stop` / etc. for patch refine. Lands on
@@ -361,6 +365,10 @@ class ChatAgent:
                                 else:
                                     itinerary_emitted = True
                                     yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
+                                    # Geocode + emit a live map preview after the
+                                    # stream closes (below), without persisting a
+                                    # trip. Capture the validated payload here.
+                                    itinerary_preview_payload = result.payload
                             else:
                                 itinerary_validation_error = result.error
                                 # Surface raw input keys + stop_reason on the wire
@@ -443,6 +451,27 @@ class ChatAgent:
                 self.trace.stage_latencies["anthropic_stream"] = (
                     time.perf_counter() - _anthropic_start
                 )
+
+                # Live map preview: geocode the freshly-emitted itinerary and
+                # push it to the client so the map populates without a Save.
+                # Best-effort — a geocode failure just leaves the map empty;
+                # the text reply and the optional Save CTA already streamed.
+                # Emitted here (after the model stream closes, before [DONE])
+                # so the slow Google calls don't hold the Anthropic stream
+                # context open. The refine path needs nothing extra — it
+                # already emits `trip_refined`, which the client renders live.
+                if itinerary_preview_payload is not None:
+                    with self.trace.stage("itinerary_preview"):
+                        try:
+                            preview = await geocode_itinerary_preview(
+                                db, itinerary_preview_payload
+                            )
+                            yield (
+                                "event: itinerary_preview\n"
+                                f"data: {json.dumps(preview)}\n\n"
+                            )
+                        except Exception:
+                            logger.exception("itinerary preview geocode failed")
 
                 # Account usage into `usage_daily` BEFORE [DONE] — same
                 # durability reasoning as the persistence block below:
