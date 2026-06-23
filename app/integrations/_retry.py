@@ -56,3 +56,25 @@ async def http_get_with_retry(
 ) -> httpx.Response:
     """`client.get(url, **kwargs)` with the shared external-API retry policy."""
     return await client.get(url, **kwargs)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential_jitter(initial=1, max=8),
+    retry=(
+        retry_if_exception_type((httpx.TimeoutException, httpx.RequestError))
+        | retry_if_result(_is_retryable_status)
+    ),
+    reraise=True,
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+)
+async def http_post_with_retry(
+    client: httpx.AsyncClient, url: str, **kwargs
+) -> httpx.Response:
+    """`client.post(url, **kwargs)` with the shared external-API retry policy.
+
+    Used for the Places API (New) `places:searchText` endpoint, which is a
+    POST (the legacy Text Search was a GET). Same policy as the GET helper:
+    retry on 429/5xx and network blips, never on other 4xx.
+    """
+    return await client.post(url, **kwargs)

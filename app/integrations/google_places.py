@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import Place, PlaceCache
-from app.integrations._retry import http_get_with_retry
+from app.integrations._retry import http_get_with_retry, http_post_with_retry
 
 
 def _is_in_albania(lat: float, lng: float) -> bool:
@@ -43,11 +43,17 @@ def _is_in_albania(lat: float, lng: float) -> bool:
 logger = logging.getLogger(__name__)
 
 
-_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
-_PHOTO_URL = "https://maps.googleapis.com/maps/api/place/photo"
-_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+# Places API (New) — the legacy `/maps/api/place/*` endpoints are not enabled
+# for newer Google Cloud projects (they return REQUEST_DENIED). The new API is
+# enabled on the same key. Auth is via the `X-Goog-Api-Key` header and the
+# requested fields via `X-Goog-FieldMask` (both required).
+_DETAILS_URL = "https://places.googleapis.com/v1/places"  # + "/{place_id}"
+_PHOTO_BASE = "https://places.googleapis.com/v1"  # + "/{photo.name}/media"
+_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+# Place Details (New) field mask — note camelCase + no "places." prefix (that
+# prefix is only for the searchText response, which nests results under `places`).
 _DETAILS_FIELDS = (
-    "place_id,name,formatted_address,geometry,rating,user_ratings_total,photos,types"
+    "id,displayName,formattedAddress,location,rating,userRatingCount,photos,types"
 )
 _HTTP_TIMEOUT = 5.0
 _MAX_PHOTOS = 5   # primary + 4 additional; resolving more doubles spend
@@ -87,6 +93,19 @@ def _http_client() -> httpx.AsyncClient:
     would close the singleton on exit.
     """
     return _client_singleton
+
+
+def _error_message(resp: httpx.Response) -> str:
+    """Best-effort extraction of the Places API (New) error message.
+
+    Error bodies look like `{"error": {"code": 403, "message": "...",
+    "status": "PERMISSION_DENIED"}}`. Falls back to a truncated body.
+    """
+    try:
+        err = (resp.json() or {}).get("error") or {}
+        return err.get("status") or err.get("message") or resp.text[:200]
+    except Exception:
+        return resp.text[:200]
 
 
 async def enrich_stop(
@@ -174,11 +193,10 @@ async def _fetch_and_cache(
     try:
         details_resp = await http_get_with_retry(
             client,
-            _DETAILS_URL,
-            params={
-                "place_id": google_place_id,
-                "fields": _DETAILS_FIELDS,
-                "key": settings.google_api_key,
+            f"{_DETAILS_URL}/{google_place_id}",
+            headers={
+                "X-Goog-Api-Key": settings.google_api_key,
+                "X-Goog-FieldMask": _DETAILS_FIELDS,
             },
         )
         if details_resp.status_code == 429:
@@ -191,27 +209,24 @@ async def _fetch_and_cache(
             )
             return None
         if details_resp.status_code != 200:
+            # Places API (New) reports errors as the HTTP status, not a body
+            # `status` field; surface the message for operator visibility.
             logger.warning(
-                "google_api=places_enrich place_id=%s status=%s",
+                "google_api=places_enrich place_id=%s status=%s detail=%s",
                 google_place_id,
                 details_resp.status_code,
+                _error_message(details_resp),
             )
             return None
-        data = details_resp.json()
-        if data.get("status") not in ("OK", None):
-            logger.warning(
-                "google_api=places_enrich place_id=%s api_status=%s",
-                google_place_id,
-                data.get("status"),
-            )
-            return None
-        result = data.get("result") or {}
-        if not result:
+        # Place Details (New) returns the place object at the top level (no
+        # `result` wrapper).
+        result = details_resp.json() or {}
+        if not result.get("id"):
             return None
         photo_refs = [
-            p.get("photo_reference")
+            p.get("name")
             for p in (result.get("photos") or [])[:_MAX_PHOTOS]
-            if p.get("photo_reference")
+            if p.get("name")
         ]
         primary, additional = await _resolve_photos(client, photo_refs)
     except (httpx.RequestError, httpx.TimeoutException) as exc:
@@ -227,9 +242,9 @@ async def _fetch_and_cache(
         )
         return None
 
-    geom = (result.get("geometry") or {}).get("location") or {}
-    lat = geom.get("lat")
-    lng = geom.get("lng")
+    loc = result.get("location") or {}
+    lat = loc.get("latitude")
+    lng = loc.get("longitude")
     if lat is None or lng is None:
         # No coords means we can't put a marker on the map. Don't cache an
         # unusable row — return None and let the next call retry.
@@ -246,8 +261,9 @@ async def _fetch_and_cache(
         )
         return None
 
-    formatted = result.get("formatted_address") or result.get("name") or ""
-    name = result.get("name") or formatted
+    display_name = (result.get("displayName") or {}).get("text") or ""
+    formatted = result.get("formattedAddress") or display_name or ""
+    name = display_name or formatted
 
     await _upsert_cache(
         db,
@@ -257,7 +273,7 @@ async def _fetch_and_cache(
         lat=lat,
         lng=lng,
         rating=result.get("rating"),
-        user_ratings_total=result.get("user_ratings_total"),
+        user_ratings_total=result.get("userRatingCount"),
         primary_photo_url=primary,
         additional_photo_urls=additional,
         types=result.get("types") or [],
@@ -276,36 +292,31 @@ async def _fetch_and_cache(
 
 
 async def _resolve_photos(
-    client: httpx.AsyncClient, photo_refs: list[str]
+    client: httpx.AsyncClient, photo_names: list[str]
 ) -> tuple[str | None, list[str]]:
-    """Convert photo_reference strings to stable redirect-target URLs.
+    """Resolve Places (New) photo resource names to stable image URLs.
 
-    Each `place/photo` endpoint returns a 302 to a googleusercontent.com URL
-    that's stable for months — much longer than the photo_reference itself.
-    Failed resolutions are logged and skipped (the place is still useful).
+    Each photo `name` (`places/{id}/photos/{ref}`) is resolved via the Photo
+    Media (New) endpoint with `skipHttpRedirect=true`, which returns JSON
+    `{"photoUri": "https://…"}` (a googleusercontent.com URL stable for
+    months) instead of a 302. Failed resolutions are logged and skipped.
     """
     resolved: list[str] = []
-    for ref in photo_refs:
+    for name in photo_names:
         try:
-            # 302 is the expected success — _is_retryable_status only
-            # retries on 429/5xx, so the redirect path is unaffected.
             resp = await http_get_with_retry(
                 client,
-                _PHOTO_URL,
-                params={
-                    "photo_reference": ref,
-                    "maxwidth": 1000,
-                    "key": settings.google_api_key,
-                },
-                follow_redirects=False,
+                f"{_PHOTO_BASE}/{name}/media",
+                params={"maxWidthPx": 1000, "skipHttpRedirect": "true"},
+                headers={"X-Goog-Api-Key": settings.google_api_key},
             )
         except (httpx.RequestError, httpx.TimeoutException) as exc:
             logger.warning(
                 "google_api=places_photo error=%s", type(exc).__name__
             )
             continue
-        if resp.status_code in (301, 302, 303, 307, 308):
-            target = resp.headers.get("location")
+        if resp.status_code == 200:
+            target = resp.json().get("photoUri")
             if target:
                 resolved.append(target)
             continue
@@ -400,20 +411,20 @@ async def find_place_id_by_name(
         return None
 
     # Always append ", Albania" so the model's city alone can't drift to a
-    # same-named locality elsewhere. `region=al` is a soft ranking bias on
+    # same-named locality elsewhere. `regionCode=AL` is a soft ranking bias on
     # the Text Search; the bbox post-filter below is the hard guard.
     query = f"{name}, {city}, Albania" if city else f"{name}, Albania"
     started = time.perf_counter()
     client = _http_client()
     try:
-        resp = await http_get_with_retry(
+        resp = await http_post_with_retry(
             client,
             _TEXT_SEARCH_URL,
-            params={
-                "query": query,
-                "region": "al",
-                "key": settings.google_api_key,
+            headers={
+                "X-Goog-Api-Key": settings.google_api_key,
+                "X-Goog-FieldMask": "places.id,places.location",
             },
+            json={"textQuery": query, "regionCode": "AL"},
         )
         if resp.status_code == 429:
             logger.warning(
@@ -422,25 +433,18 @@ async def find_place_id_by_name(
             )
             return None
         if resp.status_code != 200:
+            # Places API (New) reports errors via HTTP status + an error body
+            # (no `status` field). Surface the message for operator visibility.
             logger.warning(
-                "google_api=places_textsearch query=%r status=%s",
+                "google_api=places_textsearch query=%r status=%s detail=%s",
                 query,
                 resp.status_code,
+                _error_message(resp),
             )
             return None
         data = resp.json()
-        api_status = data.get("status")
-        if api_status == "ZERO_RESULTS":
-            _log_textsearch_done(query, "no_results", started)
-            return None
-        if api_status not in ("OK", None):
-            logger.warning(
-                "google_api=places_textsearch query=%r api_status=%s",
-                query,
-                api_status,
-            )
-            return None
-        results = data.get("results") or []
+        # searchText omits `places` entirely when there are no matches.
+        results = data.get("places") or []
     except (httpx.RequestError, httpx.TimeoutException) as exc:
         logger.warning(
             "google_api=places_textsearch query=%r error=%s",
@@ -458,10 +462,10 @@ async def find_place_id_by_name(
         _log_textsearch_done(query, "no_results", started)
         return None
     top = results[0]
-    place_id = top.get("place_id")
-    geom = (top.get("geometry") or {}).get("location") or {}
-    lat = geom.get("lat")
-    lng = geom.get("lng")
+    place_id = top.get("id")
+    loc = top.get("location") or {}
+    lat = loc.get("latitude")
+    lng = loc.get("longitude")
     if not place_id or lat is None or lng is None:
         _log_textsearch_done(query, "no_results", started)
         return None

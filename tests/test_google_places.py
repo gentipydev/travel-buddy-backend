@@ -23,11 +23,14 @@ from app.integrations.google_places import enrich_stop, find_place_id_by_name
 pytestmark = pytest.mark.anyio
 
 
-GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
-GOOGLE_PHOTO_URL = "https://maps.googleapis.com/maps/api/place/photo"
-GOOGLE_TEXTSEARCH_URL = (
-    "https://maps.googleapis.com/maps/api/place/textsearch/json"
-)
+# Places API (New) endpoints. Details is GET /v1/places/{id}; photo media is
+# GET /v1/places/{id}/photos/{ref}/media; text search is POST /v1/places:searchText.
+# The registry matches by URL prefix (first registered wins), so when a test
+# registers BOTH photo and details, the photo (more specific) prefix must be
+# registered first — `/v1/places/` is a prefix of the photo URL too.
+GOOGLE_DETAILS_URL = "https://places.googleapis.com/v1/places/"
+GOOGLE_PHOTO_URL = "https://places.googleapis.com/v1/places/ChIJtest/photos"
+GOOGLE_TEXTSEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 
 
 def _stub_settings(monkeypatch, *, key="dummy-key", places_enabled=True):
@@ -63,27 +66,26 @@ def _cached_place(google_place_id="ChIJtest") -> PlaceCache:
     )
 
 
-def _details_response(photo_refs: list[str] | None = None) -> httpx.Response:
+def _details_response(photo_names: list[str] | None = None) -> httpx.Response:
+    # Place Details (New): flat object, camelCase fields, no `result` wrapper.
     return httpx.Response(
         200,
         json={
-            "status": "OK",
-            "result": {
-                "place_id": "ChIJtest",
-                "name": "Test Place",
-                "formatted_address": "Test St, Tirana",
-                "geometry": {"location": {"lat": 41.3275, "lng": 19.8187}},
-                "rating": 4.2,
-                "user_ratings_total": 1500,
-                "photos": [{"photo_reference": ref} for ref in (photo_refs or [])],
-                "types": ["tourist_attraction"],
-            },
+            "id": "ChIJtest",
+            "displayName": {"text": "Test Place"},
+            "formattedAddress": "Test St, Tirana",
+            "location": {"latitude": 41.3275, "longitude": 19.8187},
+            "rating": 4.2,
+            "userRatingCount": 1500,
+            "photos": [{"name": name} for name in (photo_names or [])],
+            "types": ["tourist_attraction"],
         },
     )
 
 
-def _photo_redirect(target: str) -> httpx.Response:
-    return httpx.Response(302, headers={"location": target})
+def _photo_media(target: str) -> httpx.Response:
+    # Photo Media (New) with skipHttpRedirect=true returns JSON, not a 302.
+    return httpx.Response(200, json={"name": "x", "photoUri": target})
 
 
 async def test_curated_hit_skips_cache_and_api(fake_db, mock_http, monkeypatch):
@@ -122,10 +124,14 @@ async def test_fresh_fetch_when_both_miss(fake_db, mock_http, monkeypatch):
     fake_db.queue(None)   # curated miss
     fake_db.queue(None)   # cache miss
 
-    mock_http.on(GOOGLE_DETAILS_URL, lambda req: _details_response(["ref1"]))
+    # Register photo (more specific prefix) before details.
     mock_http.on(
         GOOGLE_PHOTO_URL,
-        lambda req: _photo_redirect("https://lh3.googleusercontent.example/fresh.jpg"),
+        lambda req: _photo_media("https://lh3.googleusercontent.example/fresh.jpg"),
+    )
+    mock_http.on(
+        GOOGLE_DETAILS_URL,
+        lambda req: _details_response(["places/ChIJtest/photos/ref1"]),
     )
 
     result = await enrich_stop(fake_db, "ChIJtest")
