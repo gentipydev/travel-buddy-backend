@@ -7,6 +7,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import get_supabase, settings
 from app.db.engine import init_db
+from app.domain.usage_budget import BudgetExceeded, budget_exceeded_handler
 from app.observability import bt_init, request_logging_middleware, setup_logging
 from app.observability.sentry import init_sentry
 from app.prompts.registry import validate_prompt_hashes
@@ -64,6 +65,9 @@ app = FastAPI(title="Travel Buddy API", lifespan=lifespan)
 # default (the chat client parses both).
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+# Cost-budget gates (per-user daily budget 429 / global ceiling 503)
+# share the SlowAPI body contract so the client parses both identically.
+app.add_exception_handler(BudgetExceeded, budget_exceeded_handler)
 
 # Order matters: middleware registered later wraps the handler innermost,
 # so register CORS first (innermost — closest to the route), then the

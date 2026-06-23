@@ -80,6 +80,20 @@ class Settings(BaseSettings):
     google_places_enabled: bool = True
     google_directions_enabled: bool = True
 
+    # LLM cost-abuse guards (app/domain/usage_budget.py). Costs are the
+    # same estimated-USD numbers as RequestTrace.estimated_cost_usd
+    # (app/observability/pricing.py). Setting a budget to 0 disables that
+    # check. The global ceiling is the kill-switch of last resort: when
+    # today's total estimated spend crosses it, LLM endpoints return 503
+    # until UTC midnight. Its DB SUM is cached in-process for
+    # `global_budget_cache_seconds`, so overshoot is bounded by one cache
+    # window of traffic. `max_concurrent_streams_per_user` caps parallel
+    # /chat/stream generators per verified user (0 disables).
+    daily_cost_budget_usd_per_user: float = 0.50
+    daily_cost_ceiling_usd_global: float = 20.0
+    global_budget_cache_seconds: float = 60.0
+    max_concurrent_streams_per_user: int = 2
+
     # Logging — drives `setup_logging()` in `app/main.py`. `log_format='json'`
     # is the production default (Render Logs UI filters per-field on JSON);
     # set `LOG_FORMAT=text` locally for human-friendly output.

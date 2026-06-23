@@ -10,6 +10,12 @@ from app.llm import client
 from app.db.engine import get_session
 from app.db.models import User, UserPreferences
 from app.deps import require_local_user
+from app.domain.usage_budget import (
+    check_global_ceiling,
+    check_user_budget,
+    record_usage,
+)
+from app.observability import compute_cost
 from app.prompts import get as _get_prompt
 from app.rate_limit import limiter, user_or_ip_key
 from app.schemas import UpdatePreferencesRequest
@@ -99,6 +105,12 @@ async def generate_persona(
     # the limit catches a misbehaving client or a credentials leak before
     # it racks up serious cost. `Request` is in the signature because
     # SlowAPI's decorator inspects it for the rate-limit key.
+    #
+    # Cost gates: the same per-user daily budget and global kill-switch
+    # as /chat/stream (app/domain/usage_budget.py), so a leaked credential
+    # can't sidestep the chat budget by hammering this endpoint instead.
+    await check_global_ceiling(db)
+    await check_user_budget(db, str(user.supabase_uid))
     result = await db.execute(
         select(UserPreferences).where(UserPreferences.user_id == user.id)
     )
@@ -142,5 +154,23 @@ async def generate_persona(
         .values(travel_persona=new_persona)
     )
     await db.commit()
+
+    # Fail-soft usage accounting into `usage_daily` (same ledger the
+    # budget gates above read).
+    in_tok = getattr(response.usage, "input_tokens", None)
+    out_tok = getattr(response.usage, "output_tokens", None)
+    await record_usage(
+        db,
+        str(user.supabase_uid),
+        input_tokens=in_tok or 0,
+        output_tokens=out_tok or 0,
+        estimated_cost_usd=compute_cost(
+            model=settings.model_chat,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_creation_input_tokens=None,
+            cache_read_input_tokens=None,
+        ),
+    )
 
     return {"travel_persona": new_persona}

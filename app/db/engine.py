@@ -54,7 +54,9 @@ async def get_or_create_user(db: AsyncSession, supabase_user: dict) -> User:
     )
     user = result.scalar_one_or_none()
     if not user:
-        email = supabase_user.get("email", "") or ""
+        # Guests have no email — store NULL (not "") so multiple guests don't
+        # collide on the users_email_key UNIQUE constraint.
+        email = supabase_user.get("email") or None
         user = User(
             supabase_uid=supabase_user["id"],
             name=email.split("@")[0] if email else "user",

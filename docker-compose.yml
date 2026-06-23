@@ -17,6 +17,10 @@ services:
       BRAINTRUST_PROJECT: ${BRAINTRUST_PROJECT:-travel-buddy}
       BRAINTRUST_ENABLED: ${BRAINTRUST_ENABLED:-false}
       BRAINTRUST_LOG_USER_PAYLOADS: ${BRAINTRUST_LOG_USER_PAYLOADS:-true}
+      DAILY_COST_BUDGET_USD_PER_USER: ${DAILY_COST_BUDGET_USD_PER_USER:-0.50}
+      DAILY_COST_CEILING_USD_GLOBAL: ${DAILY_COST_CEILING_USD_GLOBAL:-20.0}
+      GLOBAL_BUDGET_CACHE_SECONDS: ${GLOBAL_BUDGET_CACHE_SECONDS:-60}
+      MAX_CONCURRENT_STREAMS_PER_USER: ${MAX_CONCURRENT_STREAMS_PER_USER:-2}
     volumes:
       - ./app:/code/app        # hot-reload during development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --proxy-headers --forwarded-allow-ips '*'

@@ -31,4 +31,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers/--forwarded-allow-ips: Render terminates TLS at its proxy
+# and rewrites X-Forwarded-For with the real client IP. Without these flags
+# every request reports the proxy's IP, collapsing all per-IP rate-limit
+# buckets (app/rate_limit.py) into one shared bucket.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

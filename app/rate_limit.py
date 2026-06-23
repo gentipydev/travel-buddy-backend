@@ -5,7 +5,6 @@ Single source of truth so adding a limit to another expensive endpoint
 is correct for a single-instance Render deployment; if we go multi-
 instance, switch the storage backend to Redis here and nowhere else.
 """
-import hashlib
 import logging
 
 from fastapi import Request
@@ -18,18 +17,20 @@ logger = logging.getLogger(__name__)
 
 
 def user_or_ip_key(request: Request) -> str:
-    """Group requests by authenticated user, falling back to IP.
+    """Group requests by VERIFIED authenticated user, falling back to IP.
 
-    Hashes the Bearer token so the limiter key never includes a raw JWT
-    in memory or logs. The first 16 hex chars of SHA-256 are enough to
-    avoid collisions at this scale. Anonymous calls bucket by IP, so the
-    per-IP decorator (which also fires on every request) still bounds
-    them.
+    Keys on `request.state.verified_sub`, set by the auth dependencies in
+    `app/auth/supabase_auth.py` only after JWT signature verification.
+    Keying on the raw Bearer token (even hashed) would let an attacker
+    mint a fresh limiter bucket per request with garbage tokens, and
+    legit Supabase tokens rotate hourly — silently resetting daily
+    quotas. The sub is a Supabase UUID already logged via `user_id_var`,
+    so it is safe in limiter keys and logs. Unverified calls bucket by
+    IP, so the per-IP decorator still bounds them.
     """
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:]
-        return f"user:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+    sub = getattr(request.state, "verified_sub", None)
+    if sub:
+        return f"user:{sub}"
     return f"ip:{get_remote_address(request)}"
 
 

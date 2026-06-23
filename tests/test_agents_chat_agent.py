@@ -659,3 +659,65 @@ async def test_midstream_cancellederror_propagates_not_swallowed(
     # propagate out of athrow rather than being converted to a yielded frame.
     with pytest.raises(asyncio.CancelledError):
         await gen.athrow(asyncio.CancelledError())
+
+
+async def test_disconnect_releases_slot_and_schedules_estimated_usage(
+    monkeypatch, fake_db,
+):
+    """Cost-abuse hardening: when the client disconnects mid-stream, the
+    wrapper's `finally` must (a) release the user's concurrency slot and
+    (b) schedule a detached `usage_daily` write estimating the output
+    already streamed (~4 chars/token) — partial streams cost money too.
+    """
+    from app.domain import usage_budget
+
+    recorded: list[dict] = []
+
+    async def _fake_detached(uid, **kwargs):
+        recorded.append({"uid": uid, **kwargs})
+
+    monkeypatch.setattr(
+        chat_agent_module, "record_usage_detached", _fake_detached
+    )
+    monkeypatch.setattr(
+        chat_agent_module,
+        "client",
+        _fake_client(
+            text_chunks=["twelve chars", "never sent"],
+            final_message=_final_message(
+                content=[_text_block("twelve chars never sent")]
+            ),
+        ),
+    )
+
+    usage_budget._active_streams.clear()
+    # The router acquires the slot before constructing the agent.
+    assert usage_budget.acquire_stream_slot("uid-1") is True
+
+    agent = ChatAgent(
+        db=fake_db,
+        request=ChatRequest(message="hello"),
+        ctx=_ctx(),
+        user_id="uid-1",
+        trace=_new_trace(user_id="uid-1"),
+        started_at=0.0,
+    )
+    gen = agent.stream()
+    first = await gen.__anext__()
+    assert first == "data: twelve chars\n\n"
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    # Slot released by the finally — a reconnect isn't locked out.
+    assert usage_budget._active_streams == {}
+
+    # The detached record task was scheduled during unwinding; let the
+    # event loop run it. Only the chunk that hit the wire is billed:
+    # 12 chars // 4 = 3 estimated output tokens, input unknown → 0.
+    await asyncio.sleep(0)
+    assert len(recorded) == 1
+    assert recorded[0]["uid"] == "uid-1"
+    assert recorded[0]["input_tokens"] == 0
+    assert recorded[0]["output_tokens"] == 3
+    assert recorded[0]["estimated_cost_usd"] > 0

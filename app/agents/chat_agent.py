@@ -19,6 +19,7 @@ silently never happens. The `append_messages` / `generate_title` /
 `maybe_summarize` block must therefore complete (and emit
 `persist_failed` on its own failure) before the final `[DONE]` yield.
 """
+import asyncio
 import json
 import logging
 import time
@@ -35,6 +36,11 @@ from app.domain.conversations import (
 from app.domain.output_guard import check_output_guardrail
 from app.domain.trips.mutations import replace_trip_from_payload
 from app.domain.trips.repository import serialize_trip
+from app.domain.usage_budget import (
+    record_usage,
+    record_usage_detached,
+    release_stream_slot,
+)
 from app.llm import (
     assemble_chat_system,
     client,
@@ -93,8 +99,55 @@ class ChatAgent:
         trace.chunks_returned = ctx.chunks_returned
         trace.top_rerank_score = ctx.top_rerank_score
         trace.trip_refine = ctx.refine_trip is not None
+        # Usage-budget accounting state (app/domain/usage_budget.py).
+        # `_streamed_chars` accumulates streamed text so a client
+        # disconnect can still be billed from an estimate.
+        self._usage_recorded = False
+        self._streamed_chars = 0
 
     async def stream(self):
+        """Public entry: delegates to `_stream_inner` and owns the
+        teardown that must survive client disconnect. Starlette closes
+        the generator on disconnect, raising CancelledError /
+        GeneratorExit (BaseExceptions the inner `except Exception`
+        cannot see), so this `finally` is the only reliable place to
+        release the concurrency slot and account for tokens that
+        streamed but were never recorded. `asyncio.create_task` is
+        synchronous, so scheduling the detached write is safe during
+        cancellation unwinding (no `await` allowed here); it runs on a
+        fresh session because the request-scoped one is being torn down.
+        """
+        try:
+            async for frame in self._stream_inner():
+                yield frame
+        finally:
+            if self.user_id:
+                release_stream_slot(self.user_id)
+                if not self._usage_recorded:
+                    self._usage_recorded = True
+                    # Disconnect before usage arrived: estimate output
+                    # from streamed chars (~4 chars/token, same heuristic
+                    # as app/llm/token_budget). Input is unknown → 0; a
+                    # conservative undercount is fine — the request still
+                    # lands in `usage_daily` and the per-minute rate
+                    # limit bounds disconnect-spam.
+                    est_out = self._streamed_chars // 4
+                    asyncio.create_task(
+                        record_usage_detached(
+                            self.user_id,
+                            input_tokens=0,
+                            output_tokens=est_out,
+                            estimated_cost_usd=compute_cost(
+                                model=self.trace.model,
+                                input_tokens=0,
+                                output_tokens=est_out,
+                                cache_creation_input_tokens=0,
+                                cache_read_input_tokens=0,
+                            ),
+                        )
+                    )
+
+    async def _stream_inner(self):
         """Async generator yielding SSE frames. See module docstring for
         the strict frame ordering invariant."""
         db = self.db
@@ -202,6 +255,7 @@ class ChatAgent:
                     tools=available_tools,
                 ) as response:
                     async for text in response.text_stream:
+                        self._streamed_chars += len(text)
                         yield encode_sse_text(text)
                     # Capture final message inside the context manager so the
                     # accumulated state is still alive. Wrapped — token-count or
@@ -390,6 +444,31 @@ class ChatAgent:
                     time.perf_counter() - _anthropic_start
                 )
 
+                # Account usage into `usage_daily` BEFORE [DONE] — same
+                # durability reasoning as the persistence block below:
+                # after [DONE] the client disconnects and cancellation
+                # would silently drop the write. Fail-soft internally, so
+                # a broken accounting write can't kill the stream.
+                if self.user_id:
+                    await record_usage(
+                        db,
+                        self.user_id,
+                        input_tokens=input_tokens or 0,
+                        output_tokens=output_tokens or 0,
+                        cache_creation_input_tokens=(
+                            cache_creation_input_tokens or 0
+                        ),
+                        cache_read_input_tokens=cache_read_input_tokens or 0,
+                        estimated_cost_usd=compute_cost(
+                            model=self.trace.model,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            cache_creation_input_tokens=cache_creation_input_tokens,
+                            cache_read_input_tokens=cache_read_input_tokens,
+                        ),
+                    )
+                    self._usage_recorded = True
+
                 # Persist BEFORE yielding [DONE]. The Flutter SSE parser closes the
                 # connection on [DONE], and Starlette cancels the still-running
                 # generator at its next await point. In Python 3.12 CancelledError
@@ -516,6 +595,35 @@ class ChatAgent:
                     cache_creation_input_tokens=cache_creation_input_tokens,
                     cache_read_input_tokens=cache_read_input_tokens,
                 )
+                # Mid-stream failure: usage may never have arrived, so
+                # fall back to the streamed-chars estimate — partial
+                # output still costs money and must count toward the
+                # budget. `record_usage` rolls back internally if this
+                # session's transaction is already aborted.
+                if self.user_id and not self._usage_recorded:
+                    self._usage_recorded = True
+                    err_out = (
+                        output_tokens
+                        if output_tokens is not None
+                        else self._streamed_chars // 4
+                    )
+                    await record_usage(
+                        db,
+                        self.user_id,
+                        input_tokens=input_tokens or 0,
+                        output_tokens=err_out,
+                        cache_creation_input_tokens=(
+                            cache_creation_input_tokens or 0
+                        ),
+                        cache_read_input_tokens=cache_read_input_tokens or 0,
+                        estimated_cost_usd=compute_cost(
+                            model=self.trace.model,
+                            input_tokens=input_tokens,
+                            output_tokens=err_out,
+                            cache_creation_input_tokens=cache_creation_input_tokens,
+                            cache_read_input_tokens=cache_read_input_tokens,
+                        ),
+                    )
                 log_trace(self.trace)
                 span.log(
                     output=(

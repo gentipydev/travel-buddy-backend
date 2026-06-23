@@ -21,10 +21,17 @@ from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent
-from app.auth.supabase_auth import get_optional_user
+from app.auth.supabase_auth import get_current_user
 from app.config import settings
 from app.db.engine import get_session
 from app.domain.chat_pipeline import prepare_turn
+from app.domain.usage_budget import (
+    BudgetExceeded,
+    acquire_stream_slot,
+    check_global_ceiling,
+    check_user_budget,
+    release_stream_slot,
+)
 from app.observability import (
     RequestTrace,
     new_request_id,
@@ -60,6 +67,23 @@ router = APIRouter(tags=["chat"])
             ),
         },
         422: {"description": "Request body failed Pydantic validation"},
+        401: {
+            "description": (
+                "Missing or invalid bearer token. Chat requires a signed-in "
+                "user — anonymous calls would make per-user cost limits "
+                "unenforceable."
+            ),
+        },
+        503: {
+            "description": (
+                "Global daily spend ceiling reached "
+                "(`{\"detail\": \"service_at_capacity\"}`). Resets at UTC "
+                "midnight; Retry-After matches the ceiling cache window. "
+                "The 429 shape is also returned for `daily_budget_exceeded` "
+                "(per-user cost budget) and `concurrent_stream_limit` in "
+                "addition to SlowAPI rate limits — same body contract."
+            ),
+        },
     },
 )
 @limiter.limit("30/minute", key_func=get_remote_address)
@@ -67,10 +91,22 @@ router = APIRouter(tags=["chat"])
 async def chat_stream(
     request: Request,
     body: ChatRequest,
-    supa_user: dict | None = Depends(get_optional_user),
+    supa_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    user_id = supa_user["id"] if supa_user else None
+    user_id = supa_user["id"]
+    # Cost gates run BEFORE prepare_turn, which already spends money
+    # (Cohere embed/rerank, optional Haiku query rewrite). Order after
+    # auth (401) and the SlowAPI decorators (429 rate): global ceiling
+    # (503) → per-user budget (429) → concurrency slot (429).
+    await check_global_ceiling(db)
+    await check_user_budget(db, user_id)
+    if not acquire_stream_slot(user_id):
+        raise BudgetExceeded(
+            detail="concurrent_stream_limit",
+            status_code=429,
+            retry_after_seconds=5,
+        )
     started_at = time.perf_counter()
     # Construct the trace BEFORE prepare_turn so its inner stages
     # (context_assembly, rag_*) can append to stage_latencies. The
@@ -92,15 +128,22 @@ async def chat_stream(
         error=None,
     )
     trace_var.set(trace)
-    ctx = await prepare_turn(body, supa_user, db)
-    agent = ChatAgent(
-        db=db,
-        request=body,
-        ctx=ctx,
-        user_id=user_id,
-        trace=trace,
-        started_at=started_at,
-    )
+    # The slot is normally released in ChatAgent.stream()'s finally. If
+    # prepare_turn raises (404 trip, DB error) the generator never runs,
+    # so release here instead of leaking the slot until its TTL prune.
+    try:
+        ctx = await prepare_turn(body, supa_user, db)
+        agent = ChatAgent(
+            db=db,
+            request=body,
+            ctx=ctx,
+            user_id=user_id,
+            trace=trace,
+            started_at=started_at,
+        )
+    except BaseException:
+        release_stream_slot(user_id)
+        raise
     return StreamingResponse(
         agent.stream(),
         media_type="text/event-stream",

@@ -15,12 +15,14 @@ Mocking strategy
   `client.beta.prompt_caching.messages.stream(...)` returns a fake async
   context manager that yields chosen text chunks via `text_stream` and a
   chosen final message via `get_final_message()`.
-- FastAPI dependency overrides bypass `get_optional_user` and
-  `get_session` so no real auth/DB session is needed.
+- FastAPI dependency overrides bypass `get_current_user` (chat requires
+  a signed-in user since the cost-abuse hardening) and `get_session`
+  (FakeSession, so the budget gates and usage recording in
+  `app/domain/usage_budget.py` run against an inspectable fake).
 
 What is covered today
 ---------------------
-The anonymous, no-trip path: plain text, conversation_id ordering,
+The authenticated, no-trip path: plain text, conversation_id ordering,
 place_card ordering, valid emit_itinerary, invalid emit_itinerary
 (`event: itinerary_invalid`), the outer-try error branch
 (`event: error`, no DONE), and `RequestTrace` cache-token capture.
@@ -41,11 +43,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agents import chat_agent as chat_agent_module
-from app.auth.supabase_auth import get_optional_user
+from app.auth.supabase_auth import get_current_user
 from app.db.engine import get_session
+from app.domain import usage_budget
 from app.domain.chat_pipeline import ChatTurnContext
 from app.main import app
 from app.routers import chat as chat_router_module
+from tests.conftest import FakeSession
 
 
 # ---------------------------------------------------------------------------
@@ -179,28 +183,40 @@ def event_sequence(frames: list[tuple[str | None, str]]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+TEST_SUB = "test-sub"
+
+
 @pytest.fixture
-def client_anon():
-    """FastAPI TestClient with anonymous auth + no-op DB session.
+def chat_db() -> FakeSession:
+    """FakeSession handed to the route — the budget gates SELECT against
+    it (empty queue → None → under budget) and `record_usage` lands its
+    upsert in `.executed` for assertions."""
+    return FakeSession()
 
-    Both dependencies are overridden so the agent runs against `db=None`
-    and `supa_user=None`. The agent never touches either on the
-    no-refine, no-conversation path that these tests exercise.
+
+@pytest.fixture
+def client_authed(chat_db):
+    """FastAPI TestClient with a signed-in user + FakeSession DB.
+
+    `get_current_user` is overridden (chat rejects anonymous calls with
+    401 since the cost-abuse hardening) and the global-ceiling cache is
+    reset so one test's cached total can't leak into the next.
     """
+    usage_budget._reset_global_cache()
 
-    def _no_user():
-        return None
+    def _user():
+        return {"id": TEST_SUB, "email": None, "role": "authenticated"}
 
-    def _no_db():
-        return None
+    def _db():
+        return chat_db
 
-    app.dependency_overrides[get_optional_user] = _no_user
-    app.dependency_overrides[get_session] = _no_db
+    app.dependency_overrides[get_current_user] = _user
+    app.dependency_overrides[get_session] = _db
     try:
         with TestClient(app) as tc:
             yield tc
     finally:
-        app.dependency_overrides.pop(get_optional_user, None)
+        app.dependency_overrides.pop(get_current_user, None)
         app.dependency_overrides.pop(get_session, None)
 
 
@@ -248,7 +264,7 @@ def _patch_client(monkeypatch, text_chunks: list[str], final_message: Any) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_plain_text_turn_emits_data_then_done(monkeypatch, client_anon):
+def test_plain_text_turn_emits_data_then_done(monkeypatch, client_authed):
     """No tools, no conversation: only `data:` text frames + `data: [DONE]`."""
     _patch_prepare_turn(monkeypatch, _ctx())
     _patch_client(
@@ -257,7 +273,7 @@ def test_plain_text_turn_emits_data_then_done(monkeypatch, client_anon):
         final_message=_final_message(content=[_text_block("Hello there!")]),
     )
 
-    response = client_anon.post("/chat/stream", json={"message": "hi"})
+    response = client_authed.post("/chat/stream", json={"message": "hi"})
     assert response.status_code == 200
 
     frames = parse_sse(response.text)
@@ -267,7 +283,7 @@ def test_plain_text_turn_emits_data_then_done(monkeypatch, client_anon):
     assert frames[-1] == (None, "[DONE]")
 
 
-def test_conversation_id_event_lands_first(monkeypatch, client_anon):
+def test_conversation_id_event_lands_first(monkeypatch, client_authed):
     """When `prepare_turn` produces a new_conversation_id, that frame ships
     FIRST — before any text or [DONE]. The Flutter client uses this to
     pin the new conversation in its store before the first token lands.
@@ -280,14 +296,14 @@ def test_conversation_id_event_lands_first(monkeypatch, client_anon):
         final_message=_final_message(content=[_text_block("ok")]),
     )
 
-    response = client_anon.post("/chat/stream", json={"message": "hi"})
+    response = client_authed.post("/chat/stream", json={"message": "hi"})
     frames = parse_sse(response.text)
     assert frames[0] == ("conversation_id", str(cid))
     assert event_sequence(frames) == ["conversation_id", "data", "data"]
     assert frames[-1] == (None, "[DONE]")
 
 
-def test_place_card_event_precedes_text(monkeypatch, client_anon):
+def test_place_card_event_precedes_text(monkeypatch, client_authed):
     """A place_card frame, when present, lands after conversation_id (if
     any) and before any text chunks."""
     payload = json.dumps({"name": "Tirana", "id": "1"})
@@ -298,7 +314,7 @@ def test_place_card_event_precedes_text(monkeypatch, client_anon):
         final_message=_final_message(content=[_text_block("ok")]),
     )
 
-    response = client_anon.post(
+    response = client_authed.post(
         "/chat/stream", json={"message": "tell me about Tirana"}
     )
     frames = parse_sse(response.text)
@@ -307,7 +323,7 @@ def test_place_card_event_precedes_text(monkeypatch, client_anon):
     assert frames[-1] == (None, "[DONE]")
 
 
-def test_valid_itinerary_emits_itinerary_event(monkeypatch, client_anon):
+def test_valid_itinerary_emits_itinerary_event(monkeypatch, client_authed):
     """A valid emit_itinerary tool call lands as `event: itinerary` BEFORE
     [DONE], with the validated payload as JSON in the data field."""
     itinerary_input = {
@@ -332,7 +348,7 @@ def test_valid_itinerary_emits_itinerary_event(monkeypatch, client_anon):
         ),
     )
 
-    response = client_anon.post(
+    response = client_authed.post(
         "/chat/stream", json={"message": "plan me a day in Tirana"}
     )
     frames = parse_sse(response.text)
@@ -347,7 +363,7 @@ def test_valid_itinerary_emits_itinerary_event(monkeypatch, client_anon):
     assert itin["days"][0]["stops"][0]["name"] == "Skanderbeg Square"
 
 
-def test_invalid_itinerary_emits_itinerary_invalid(monkeypatch, client_anon):
+def test_invalid_itinerary_emits_itinerary_invalid(monkeypatch, client_authed):
     """emit_itinerary with a bad shape (missing `days`) becomes
     `event: itinerary_invalid` carrying the Pydantic error summary —
     NOT `event: itinerary`. The natural-language reply still streamed
@@ -367,7 +383,7 @@ def test_invalid_itinerary_emits_itinerary_invalid(monkeypatch, client_anon):
         ),
     )
 
-    response = client_anon.post(
+    response = client_authed.post(
         "/chat/stream", json={"message": "plan me a trip"}
     )
     frames = parse_sse(response.text)
@@ -385,7 +401,7 @@ def test_invalid_itinerary_emits_itinerary_invalid(monkeypatch, client_anon):
     assert err["raw_keys"] == ["title"]
 
 
-def test_stream_error_emits_error_event_no_done(monkeypatch, client_anon):
+def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
     """When the Anthropic call raises synchronously, the outer try/except
     yields `event: error\\ndata: <exc message>\\n\\n` and falls through
     without yielding `[DONE]`. The Flutter client treats absence of
@@ -404,7 +420,7 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_anon):
     )
     monkeypatch.setattr(chat_agent_module, "client", fake)
 
-    response = client_anon.post("/chat/stream", json={"message": "hi"})
+    response = client_authed.post("/chat/stream", json={"message": "hi"})
     frames = parse_sse(response.text)
     seq = event_sequence(frames)
 
@@ -422,7 +438,7 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_anon):
 # ---------------------------------------------------------------------------
 
 
-def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_anon, caplog):
+def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, caplog):
     """`cache_creation_input_tokens` and `cache_read_input_tokens` ride on
     `final.usage` and are emitted on the `RequestTrace` JSON log line.
     This is what dashboards key off to compute cache hit rate."""
@@ -442,7 +458,7 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_anon, caplog
     )
 
     with caplog.at_level(logging.INFO, logger="app.observability.telemetry"):
-        response = client_anon.post("/chat/stream", json={"message": "hi"})
+        response = client_authed.post("/chat/stream", json={"message": "hi"})
         assert response.status_code == 200
 
     trace_records = [
@@ -470,7 +486,7 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_anon, caplog
     assert trace["estimated_cost_usd"] == pytest.approx(0.00445)
 
 
-def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_anon, caplog):
+def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_authed, caplog):
     """A successful emit_itinerary sets `itinerary_emitted=True` and
     captures `itinerary_days` on the telemetry trace."""
     _patch_prepare_turn(monkeypatch, _ctx())
@@ -496,7 +512,7 @@ def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_anon, caplog):
     )
 
     with caplog.at_level(logging.INFO, logger="app.observability.telemetry"):
-        response = client_anon.post("/chat/stream", json={"message": "plan"})
+        response = client_authed.post("/chat/stream", json={"message": "plan"})
         assert response.status_code == 200
 
     trace_records = [
@@ -507,3 +523,84 @@ def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_anon, caplog):
     assert trace["itinerary_emitted"] is True
     assert trace["itinerary_days"] == 2
     assert trace["itinerary_validation_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests — cost-abuse hardening (auth requirement, budget gate, accounting).
+# ---------------------------------------------------------------------------
+
+
+def test_chat_requires_auth():
+    """No bearer token → 401 before any LLM/DB work. Chat must not be
+    callable anonymously: per-user cost limits would be unenforceable."""
+
+    def _no_db():
+        return None
+
+    app.dependency_overrides[get_session] = _no_db
+    try:
+        with TestClient(app) as tc:
+            response = tc.post("/chat/stream", json={"message": "hi"})
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert response.status_code == 401
+
+
+def test_budget_exceeded_returns_429_before_streaming(
+    monkeypatch, client_authed, chat_db
+):
+    """A user at their daily cost budget gets the pinned 429 body and no
+    stream bytes — the gate fires before `prepare_turn` spends money."""
+    monkeypatch.setattr(
+        usage_budget.settings, "daily_cost_budget_usd_per_user", 0.50
+    )
+    # Gate order: global ceiling SUM first (queue 0 → under), then the
+    # user's spent-today SELECT (queue ≥ budget → blocked).
+    chat_db.queue(0.0)
+    chat_db.queue(9.99)
+
+    response = client_authed.post("/chat/stream", json={"message": "hi"})
+
+    assert response.status_code == 429
+    body = response.json()
+    assert body["detail"] == "daily_budget_exceeded"
+    assert 1 <= body["retry_after_seconds"] <= 86400
+    assert response.headers["Retry-After"] == str(body["retry_after_seconds"])
+
+
+def test_global_ceiling_returns_503(monkeypatch, client_authed, chat_db):
+    """Today's total spend at/over the global ceiling → 503 kill-switch."""
+    monkeypatch.setattr(
+        usage_budget.settings, "daily_cost_ceiling_usd_global", 1.0
+    )
+    chat_db.queue(2.0)  # global SUM ≥ ceiling
+
+    response = client_authed.post("/chat/stream", json={"message": "hi"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "service_at_capacity"
+    assert "Retry-After" in response.headers
+
+
+def test_usage_recorded_after_streamed_turn(monkeypatch, client_authed, chat_db):
+    """A successful turn lands exactly one `usage_daily` upsert + commit —
+    the ledger the budget gates read."""
+    _patch_prepare_turn(monkeypatch, _ctx())
+    _patch_client(
+        monkeypatch,
+        text_chunks=["ok"],
+        final_message=_final_message(content=[_text_block("ok")]),
+    )
+
+    response = client_authed.post("/chat/stream", json={"message": "hi"})
+    assert response.status_code == 200
+    assert parse_sse(response.text)[-1] == (None, "[DONE]")
+
+    usage_stmts = [
+        s
+        for s in chat_db.executed
+        if getattr(getattr(s, "table", None), "name", None) == "usage_daily"
+    ]
+    assert len(usage_stmts) == 1
+    assert chat_db.committed >= 1

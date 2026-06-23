@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, Date, Index, CheckConstraint, UniqueConstraint, Computed
+from sqlalchemy import Column, String, Text, Integer, BigInteger, Numeric, Float, ForeignKey, DateTime, Date, Index, CheckConstraint, UniqueConstraint, Computed
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, TSVECTOR
 from sqlalchemy.orm import declarative_base, relationship
 from pgvector.sqlalchemy import Vector
@@ -20,7 +20,10 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     supabase_uid = Column(String, unique=True, index=True, nullable=True)
     name = Column(String, nullable=False)
-    email = Column(String, unique=True, nullable=False, index=True)
+    # Nullable: anonymous (guest) users have no email. NULLs are distinct under
+    # a UNIQUE constraint in Postgres, so any number of guests can coexist —
+    # storing "" instead collides on the second guest (users_email_key).
+    email = Column(String, unique=True, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     preferences = relationship("UserPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
@@ -442,3 +445,27 @@ Index(
     Artifact.search_text,
     postgresql_using="gin",
 )
+
+
+class UsageDaily(Base):
+    """Per-user daily LLM usage for cost-budget enforcement (migration 018).
+
+    Keyed on the verified Supabase sub rather than `users.id` so that
+    authenticated-but-unsynced users are still metered. One row per
+    (user, UTC day); counters are accumulated via upsert in
+    `app/domain/usage_budget.py:record_usage`.
+    """
+    __tablename__ = "usage_daily"
+
+    supabase_uid = Column(String, primary_key=True)
+    usage_date = Column(Date, primary_key=True)
+    requests = Column(Integer, nullable=False, default=0)
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    cache_creation_input_tokens = Column(BigInteger, nullable=False, default=0)
+    cache_read_input_tokens = Column(BigInteger, nullable=False, default=0)
+    estimated_cost_usd = Column(Numeric(12, 6), nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+Index("usage_daily_date_idx", UsageDaily.usage_date)

@@ -1,7 +1,7 @@
 import logging
 from functools import lru_cache
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, decode as jwt_decode
 
@@ -41,6 +41,7 @@ def _verify(token: str) -> dict:
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
     """Require authenticated user. Raises 401 if no valid token."""
@@ -48,6 +49,10 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Not authenticated")
     payload = _verify(credentials.credentials)
     user_id_var.set(payload["sub"])
+    # Verified identity for the rate limiter. SlowAPI's key func only gets
+    # the Request, and deps resolve before the limit decorator fires, so
+    # request.state is the handoff point (see app/rate_limit.py).
+    request.state.verified_sub = payload["sub"]
     return {
         "id": payload["sub"],
         "email": payload.get("email"),
@@ -56,6 +61,7 @@ async def get_current_user(
 
 
 async def get_optional_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict | None:
     """Optional auth. Returns None if no token or invalid token."""
@@ -64,6 +70,7 @@ async def get_optional_user(
     try:
         payload = _verify(credentials.credentials)
         user_id_var.set(payload["sub"])
+        request.state.verified_sub = payload["sub"]
         return {
             "id": payload["sub"],
             "email": payload.get("email"),
