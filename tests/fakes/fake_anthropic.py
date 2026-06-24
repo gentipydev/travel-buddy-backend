@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 _CASSETTES_DIR = Path(__file__).parent / "cassettes"
@@ -76,6 +77,18 @@ class _FakeResponse:
                 yield chunk
 
         return _gen()
+
+    async def __aiter__(self):
+        # The SDK's full event stream: a `text` event per delta, then one
+        # `input_json` event (full snapshot) per emit_itinerary tool_use,
+        # so the agent's per-stop live-map path is exercised.
+        for chunk in self._deltas:
+            yield SimpleNamespace(type="text", text=chunk, snapshot=chunk)
+        for block in self._final.content:
+            if getattr(block, "type", None) == "tool_use" and (
+                getattr(block, "name", None) == "emit_itinerary"
+            ):
+                yield SimpleNamespace(type="input_json", snapshot=block.input)
 
     async def get_final_message(self):
         return self._final

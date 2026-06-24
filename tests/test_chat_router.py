@@ -113,6 +113,18 @@ class _FakeStreamResponse:
 
         return _gen()
 
+    async def __aiter__(self):
+        # Mirror the SDK's helper event stream: a `text` event per chunk,
+        # then one `input_json` event (full snapshot) per emit_itinerary
+        # tool_use so the agent's per-stop streaming path is exercised.
+        for chunk in self._chunks:
+            yield SimpleNamespace(type="text", text=chunk, snapshot=chunk)
+        for block in getattr(self._final, "content", []):
+            if getattr(block, "type", None) == "tool_use" and (
+                block.name == "emit_itinerary"
+            ):
+                yield SimpleNamespace(type="input_json", snapshot=block.input)
+
     async def get_final_message(self):
         return self._final
 

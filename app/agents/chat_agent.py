@@ -34,7 +34,10 @@ from app.domain.conversations import (
     maybe_summarize,
 )
 from app.domain.output_guard import check_output_guardrail
-from app.domain.trips.enrichment import geocode_itinerary_preview
+from app.domain.trips.enrichment import (
+    geocode_itinerary_preview,
+    geocode_stop_preview,
+)
 from app.domain.trips.mutations import replace_trip_from_payload
 from app.domain.trips.repository import serialize_trip
 from app.domain.usage_budget import (
@@ -63,6 +66,71 @@ from app.tools.refine import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _flatten_stops(itinerary: dict) -> list[dict]:
+    """Flatten an emit_itinerary input (full or partially-parsed snapshot)
+    into an ordered list of stop dicts carrying their day_number +
+    in-day sort_order. Tolerant of missing/half-built keys so it can run
+    against a streaming `input_json` snapshot."""
+    out: list[dict] = []
+    days = itinerary.get("days")
+    if not isinstance(days, list):
+        return out
+    for day in days:
+        if not isinstance(day, dict):
+            continue
+        day_number = day.get("day_number")
+        stops = day.get("stops")
+        if not isinstance(stops, list):
+            continue
+        for i, stop in enumerate(stops):
+            if not isinstance(stop, dict):
+                continue
+            out.append(
+                {
+                    "day_number": day_number,
+                    "sort_order": i,
+                    "name": stop.get("name"),
+                    "kind": stop.get("kind"),
+                    "city": stop.get("city"),
+                    "lat": stop.get("lat"),
+                    "lng": stop.get("lng"),
+                    "google_place_id": stop.get("google_place_id"),
+                }
+            )
+    return out
+
+
+async def _stop_marker_frame(stop: dict, index: int) -> str | None:
+    """Geocode one streamed stop and render it as an `itinerary_stop` SSE
+    frame for the live map. Returns None when the stop has no name or can't
+    be mapped (the client simply doesn't get a marker for it)."""
+    name = (stop.get("name") or "").strip()
+    if not name:
+        return None
+    geo = await geocode_stop_preview(
+        name=name,
+        city=stop.get("city"),
+        lat=stop.get("lat"),
+        lng=stop.get("lng"),
+    )
+    if geo is None:
+        return None
+    lat, lng, place_id = geo
+    payload = {
+        "id": f"live-{stop.get('day_number')}-{stop.get('sort_order')}",
+        "index": index,
+        "day_number": stop.get("day_number"),
+        "sort_order": stop.get("sort_order"),
+        "name": name,
+        "kind": stop.get("kind"),
+        "city": stop.get("city"),
+        "lat": lat,
+        "lng": lng,
+        "google_place_id": stop.get("google_place_id") or place_id,
+    }
+    return f"event: itinerary_stop\ndata: {json.dumps(payload)}\n\n"
 
 
 class ChatAgent:
@@ -163,9 +231,17 @@ class ChatAgent:
         itinerary_emitted: bool = False
         itinerary_days: int | None = None
         itinerary_validation_error: str | None = None
-        # Validated emit_itinerary payload, set on the initial-creation path
-        # so we can geocode + emit a live map preview after the stream closes.
+        # Validated emit_itinerary payload, set on the initial-creation path.
+        # Used only as a fallback (whole-trip geocode) when per-stop streaming
+        # produced no markers — e.g. partial-JSON parsing surfaced nothing.
         itinerary_preview_payload: dict | None = None
+        # Per-stop live-map streaming state (initial-creation path only).
+        # `preview_started` gates the one-time stream-start frame the client
+        # uses to reset its live trip; `preview_emitted` is how many flattened
+        # stops we've consumed (mapped or skipped) so the end-of-stream flush
+        # knows where to resume.
+        preview_started: bool = False
+        preview_emitted: int = 0
         # Tool names Claude fired this turn — empty for plain chat,
         # `["emit_itinerary"]` for whole-trip create, one or more
         # `update_stop` / `insert_stop` / etc. for patch refine. Lands on
@@ -258,9 +334,34 @@ class ChatAgent:
                     messages=ctx.messages,
                     tools=available_tools,
                 ) as response:
-                    async for text in response.text_stream:
-                        self._streamed_chars += len(text)
-                        yield encode_sse_text(text)
+                    # Iterate the full event stream (not just text_stream) so we
+                    # can watch the emit_itinerary tool input accumulate and drop
+                    # each stop onto the live map the moment it's complete — long
+                    # before the model finishes the prose. `input_json` events
+                    # carry `snapshot`, the partially-parsed tool input dict.
+                    async for event in response:
+                        etype = getattr(event, "type", None)
+                        if etype == "text":
+                            self._streamed_chars += len(event.text)
+                            yield encode_sse_text(event.text)
+                        elif etype == "input_json" and ctx.refine_trip is None:
+                            snap = event.snapshot
+                            if not isinstance(snap, dict):
+                                continue
+                            # All stops except the last parsed one are safely
+                            # complete (the last may still be streaming). The
+                            # trailing stop(s) are flushed after the final message.
+                            flat = _flatten_stops(snap)
+                            ready = flat[:-1] if len(flat) > 1 else []
+                            while preview_emitted < len(ready):
+                                s = ready[preview_emitted]
+                                preview_emitted += 1
+                                frame = await _stop_marker_frame(s, preview_emitted)
+                                if frame:
+                                    if not preview_started:
+                                        preview_started = True
+                                        yield "event: itinerary_stream_start\ndata: {}\n\n"
+                                    yield frame
                     # Capture final message inside the context manager so the
                     # accumulated state is still alive. Wrapped — token-count or
                     # SDK-shape failures must not crash the request.
@@ -364,10 +465,29 @@ class ChatAgent:
                                         )
                                 else:
                                     itinerary_emitted = True
+                                    # Flush stops the per-stop streamer held back
+                                    # (the trailing stop, plus any the partial
+                                    # parser never surfaced) using the validated
+                                    # payload — the canonical, complete plan.
+                                    final_flat = _flatten_stops(result.payload)
+                                    while preview_emitted < len(final_flat):
+                                        s = final_flat[preview_emitted]
+                                        preview_emitted += 1
+                                        frame = await _stop_marker_frame(
+                                            s, preview_emitted
+                                        )
+                                        if frame:
+                                            if not preview_started:
+                                                preview_started = True
+                                                yield (
+                                                    "event: itinerary_stream_start\n"
+                                                    "data: {}\n\n"
+                                                )
+                                            yield frame
                                     yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
-                                    # Geocode + emit a live map preview after the
-                                    # stream closes (below), without persisting a
-                                    # trip. Capture the validated payload here.
+                                    # Fallback only: if per-stop streaming yielded
+                                    # nothing mappable, geocode the whole trip
+                                    # after the stream closes (handled below).
                                     itinerary_preview_payload = result.payload
                             else:
                                 itinerary_validation_error = result.error
@@ -452,24 +572,24 @@ class ChatAgent:
                     time.perf_counter() - _anthropic_start
                 )
 
-                # Live map preview: geocode the freshly-emitted itinerary and
-                # push it to the client so the map populates without a Save.
-                # Best-effort — a geocode failure just leaves the map empty;
-                # the text reply and the optional Save CTA already streamed.
-                # Emitted here (after the model stream closes, before [DONE])
-                # so the slow Google calls don't hold the Anthropic stream
-                # context open. The refine path needs nothing extra — it
-                # already emits `trip_refined`, which the client renders live.
-                if itinerary_preview_payload is not None:
+                # Live map fallback: per-stop streaming above normally populates
+                # the map as stops generate. Only if it surfaced NOTHING mappable
+                # (e.g. partial-JSON parsing yielded no usable stops) do we
+                # geocode the whole validated trip in one shot here and push a
+                # single preview. Best-effort — a failure just leaves the map
+                # empty; the text + optional Save already streamed. The refine
+                # path needs nothing extra — it emits `trip_refined`.
+                if itinerary_preview_payload is not None and not preview_started:
                     with self.trace.stage("itinerary_preview"):
                         try:
                             preview = await geocode_itinerary_preview(
                                 db, itinerary_preview_payload
                             )
-                            yield (
-                                "event: itinerary_preview\n"
-                                f"data: {json.dumps(preview)}\n\n"
-                            )
+                            if preview:
+                                yield (
+                                    "event: itinerary_preview\n"
+                                    f"data: {json.dumps(preview)}\n\n"
+                                )
                         except Exception:
                             logger.exception("itinerary preview geocode failed")
 

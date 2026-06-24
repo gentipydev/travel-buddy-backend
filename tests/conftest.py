@@ -42,6 +42,26 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def _no_chat_geocode(monkeypatch):
+    """Keep the chat agent's live-map geocoding off the network by default.
+
+    `ChatAgent.stream()` now geocodes itinerary stops (per-stop + a whole-trip
+    fallback) to drive the live map. Those call Google Places via real HTTP,
+    which unit tests must not hit. Default both to no-ops returning nothing —
+    so the map side-channel emits no frames and the text/itinerary/refine
+    contract every existing test pins stays unchanged. A test that wants to
+    exercise the geocoding path re-patches these (later setattr wins)."""
+    from unittest.mock import AsyncMock
+
+    from app.agents import chat_agent as _m
+
+    monkeypatch.setattr(_m, "geocode_stop_preview", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        _m, "geocode_itinerary_preview", AsyncMock(return_value=None)
+    )
+
+
 class FakeResult:
     def __init__(self, value: Any):
         self._value = value

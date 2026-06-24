@@ -347,6 +347,36 @@ def _build_static_map(
     )
 
 
+async def geocode_stop_preview(
+    *,
+    name: str,
+    city: str | None,
+    lat: float | None,
+    lng: float | None,
+) -> tuple[float, float, str | None] | None:
+    """Resolve one stop's coordinates for the live map, no persistence.
+
+    Used by `/chat/stream` to drop a marker the instant a stop streams out
+    of the itinerary tool call. Prefers coords Claude already supplied;
+    otherwise runs the same Google Places text-search (`find_place_id_by_name`)
+    every saved trip uses. Returns `(lat, lng, google_place_id|None)` or
+    None when the stop can't be mapped. Never raises.
+    """
+    if lat is not None and lng is not None:
+        return lat, lng, None
+    if not (name or "").strip():
+        return None
+    try:
+        result = await find_place_id_by_name(name=name, city=city)
+    except Exception:
+        logger.warning("geocode_stop_preview name=%r raised", name, exc_info=True)
+        return None
+    if result is None:
+        return None
+    place_id, r_lat, r_lng = result
+    return r_lat, r_lng, place_id
+
+
 async def geocode_itinerary_preview(db: AsyncSession, payload: dict) -> dict:
     """Geocode a draft itinerary WITHOUT persisting it, for the live map.
 

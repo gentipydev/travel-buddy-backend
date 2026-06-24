@@ -37,9 +37,14 @@ ITINERARY_TOOL = {
         "\"I've created an itinerary for you, tap Save to see it.\" The "
         "user should be able to read the entire plan in the chat without "
         "saving anything.\n\n"
-        "Write the text first as you normally would: warm, descriptive, "
-        "day by day, stop by stop. Then emit the tool call with the "
-        "structured equivalent. Both in the same response."
+        "ORDER — call this tool FIRST, then write the prose. Emit the "
+        "emit_itinerary tool call at the very start of your response "
+        "(before any prose), then write the full warm, descriptive, "
+        "day-by-day, stop-by-stop plan as text. The structured stops are "
+        "streamed onto a live map as you produce them, so they must come "
+        "first. Calling the tool first does NOT let you shorten the prose: "
+        "the text plan that follows must still be complete — every day, "
+        "every stop. Both in the same response."
     ),
     "input_schema": {
         "type": "object",

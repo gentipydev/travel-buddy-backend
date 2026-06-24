@@ -193,6 +193,75 @@ async def test_refine_via_emit_itinerary_commits_and_emits_trip_refined(
 
 
 # ---------------------------------------------------------------------------
+# Live-map per-stop streaming (initial-creation path).
+# ---------------------------------------------------------------------------
+
+
+async def test_emit_itinerary_streams_per_stop_markers(monkeypatch, fake_db):
+    """On a non-refine emit_itinerary, each geocoded stop streams as an
+    `itinerary_stop` frame (preceded by one `itinerary_stream_start`), the
+    `itinerary` Save payload still lands, and [DONE] is last."""
+    itinerary = {
+        "title": "Tirana",
+        "days": [
+            {
+                "day_number": 1,
+                "stops": [
+                    {"name": "Skanderbeg Square", "kind": "sight"},
+                    {"name": "Bunk'Art 2", "kind": "sight"},
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        chat_agent_module,
+        "client",
+        _fake_client(
+            text_chunks=["A lovely day."],
+            final_message=_final_message(
+                content=[
+                    _text_block("A lovely day."),
+                    _tool_use("emit_itinerary", itinerary),
+                ],
+                stop_reason="tool_use",
+            ),
+        ),
+    )
+
+    # Override the conftest no-op so stops actually geocode to coords.
+    async def _fake_geocode(*, name, city, lat, lng):
+        return (41.33, 19.82, f"pid-{name}")
+
+    monkeypatch.setattr(chat_agent_module, "geocode_stop_preview", _fake_geocode)
+
+    agent = ChatAgent(
+        db=fake_db,
+        request=ChatRequest(message="a day in Tirana"),
+        ctx=_ctx(),  # no conversation, no refine → anonymous create path
+        user_id=None,
+        trace=_new_trace(),
+        started_at=0.0,
+    )
+    frames = await _drain(agent.stream())
+    events = _events(frames)
+
+    assert events.count("itinerary_stream_start") == 1
+    assert events.count("itinerary_stop") == 2  # both stops mapped
+    # Live markers stream BEFORE the Save payload, which precedes [DONE].
+    assert events.index("itinerary_stream_start") < events.index("itinerary")
+    assert "itinerary" in events
+    assert frames[-1] == "data: [DONE]\n\n"
+
+    # Each stop frame carries usable coordinates.
+    stop_frames = [f for f in frames if f.startswith("event: itinerary_stop")]
+    import json as _json
+
+    first = _json.loads(stop_frames[0].split("data: ", 1)[1])
+    assert first["lat"] == 41.33 and first["lng"] == 19.82
+    assert first["day_number"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Refine path: apply_refine_tool patch tools.
 # ---------------------------------------------------------------------------
 
