@@ -326,7 +326,7 @@ def _build_persona_gate() -> Any:
             "A=YES (system was right) B=NO (system was wrong)."
         ),
         choice_scores={"A": 1.0, "B": 0.0},
-        model="claude-haiku-4-5-20251001",
+        model="gemini-3.5-flash",
         use_cot=False,
     )
 
@@ -359,7 +359,7 @@ _faithfulness_scorer: Any = None
 # Eval-only judge prompt (no production equivalent, unlike persona_gate which
 # reuses the live gate prompt), so it lives inline here rather than in the
 # `app/prompts` registry — that registry is for prompts the backend sends to
-# Claude in production. Mustache dotted access (`{{input.context}}`) is
+# the model in production. Mustache dotted access (`{{input.context}}`) is
 # supported by autoevals' chevron renderer.
 _FAITHFULNESS_TEMPLATE = """\
 You are a strict fact-checker for an Albania travel assistant.
@@ -406,7 +406,7 @@ def _build_faithfulness() -> Any:
         name="answer_faithfulness",
         prompt_template=_FAITHFULNESS_TEMPLATE,
         choice_scores={"A": 1.0, "B": 0.0},
-        model="claude-haiku-4-5-20251001",
+        model="gemini-3.5-flash",
         use_cot=True,
     )
 
@@ -476,14 +476,14 @@ def _build_output_guardrail() -> Any:
     system_text = get_prompt("output_guard.system").text
     # Mustache template: {{output}} is the assistant reply under review.
     # We append the REPLY block so the judge sees the same structure as the
-    # production messages.create() call (system sets the rules; user message
+    # production generate_content() call (system sets the rules; user message
     # is the reply body).
     template = system_text + "\n\nREPLY:\n{{output}}"
     return LLMClassifier(
         name="output_guardrail",
         prompt_template=template,
         choice_scores={"SAFE": 1.0, "REVIEW": 0.0},
-        model="claude-haiku-4-5-20251001",
+        model="gemini-3.5-flash",
         use_cot=False,
     )
 

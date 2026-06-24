@@ -1,65 +1,30 @@
-"""Anthropic prompt-caching helpers.
+"""System-prompt assembly for the chat path.
 
-Prompt caching lets us re-send a stable system prompt without paying for
-the input tokens every turn. The Anthropic API marks a cacheable
-"breakpoint" with `cache_control: {"type": "ephemeral"}` on a block; on
-the next request within ~5 minutes that breakpoint is reused, and only
-the suffix counts as billable input.
+Anthropic took the system prompt as a list of text blocks and let us mark a
+cacheable "breakpoint" with `cache_control: ephemeral` on the stable prefix.
+Gemini has no per-request breakpoint API — it caches implicitly (automatic
+on 2.5+/3 models) and takes the system prompt as a single
+`config.system_instruction` string. So assembly collapses to a string join.
 
-Single highest-leverage win on the chat path: the ~3-4k tokens of base
-prompt + addenda + preferences are stable across turns within a session.
-Refine turns carry a large but per-turn-volatile `trip_json`; we cache
-only the prefix and leave `trip_json` uncached.
-
-`assemble_chat_system` returns a `list[dict]` compatible with the
-Anthropic SDK's `PromptCachingBetaTextBlockParam`. The chat agent passes
-it as `system=` to `client.beta.prompt_caching.messages.stream(...)`; the
-SDK injects the `anthropic-beta: prompt-caching-2024-07-31` header.
+The split into `cached_prefix` (stable base prompt + addenda + preferences)
+and `volatile_suffix` (per-turn refine addendum + retrieved RAG context) is
+still meaningful upstream: `app/llm/token_budget.py` only ever trims the
+volatile suffix, and implicit caching keys off the longest stable prefix —
+so keeping the stable text first still maximizes cache hits.
 """
-from typing import Literal, TypedDict
-
-
-class CacheControl(TypedDict):
-    type: Literal["ephemeral"]
-
-
-class TextBlock(TypedDict, total=False):
-    type: Literal["text"]
-    text: str
-    cache_control: CacheControl
-
-
-EPHEMERAL: CacheControl = {"type": "ephemeral"}
-
-# Anthropic caps cache_control markers at 4 per request. We use 1 today
-# (the chat prefix); the limit is documented here so future call sites
-# don't accidentally exceed it.
-_MAX_BREAKPOINTS = 4
-
-
-def cached_text(text: str) -> TextBlock:
-    """A text block marked as a cache breakpoint."""
-    return {"type": "text", "text": text, "cache_control": EPHEMERAL}
-
-
-def plain_text(text: str) -> TextBlock:
-    """A text block that is NOT a cache breakpoint."""
-    return {"type": "text", "text": text}
 
 
 def assemble_chat_system(
     *,
     cached_prefix: str,
     volatile_suffix: str = "",
-) -> list[TextBlock]:
-    """Build a 2-block system payload: a cached prefix + an optional
-    uncached suffix.
+) -> str:
+    """Join the stable prefix and the per-turn volatile suffix into the single
+    `system_instruction` string Gemini takes.
 
-    Pass an empty `volatile_suffix` to cache the whole system. The chat
-    agent uses the suffix for the refine addendum (carries trip_json that
-    varies per turn) and for retrieved RAG context (varies per query).
+    The stable prefix is placed first so implicit caching can reuse it across
+    turns. Pass an empty `volatile_suffix` to send just the prefix.
     """
-    blocks: list[TextBlock] = [cached_text(cached_prefix)]
     if volatile_suffix:
-        blocks.append(plain_text(volatile_suffix))
-    return blocks
+        return f"{cached_prefix}\n\n{volatile_suffix}"
+    return cached_prefix

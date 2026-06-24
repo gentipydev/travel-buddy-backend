@@ -1,17 +1,17 @@
-"""Rolling conversation summarization + Claude-generated titles.
+"""Rolling conversation summarization + model-generated titles.
 
 `maybe_summarize` runs after every assistant turn. When the messages
 array exceeds `_SUMMARIZE_TRIGGER`, the oldest `_SUMMARIZE_BATCH` are
-compacted into `Conversation.summary` via Claude and dropped from the
+compacted into `Conversation.summary` via the LLM and dropped from the
 array. A persona-refresh task is fired-and-forgotten on success.
 
 `generate_title` is best-effort: on conversation-creation turns it
-replaces the placeholder first-6-words title with a Claude-summarized
+replaces the placeholder first-6-words title with a model-summarized
 3-5 word label.
 
-Both Claude calls fail soft — failures log and return; the next turn
+Both LLM calls fail soft — failures log and return; the next turn
 retries. Caller passes the model id so /chat/stream can pin Title and
-Summarize to their own settings.* fields (currently both Haiku).
+Summarize to their own settings.* fields.
 """
 import asyncio
 import logging
@@ -25,8 +25,8 @@ from app.domain.conversations.repository import (
     _SUMMARIZE_BATCH,
     _SUMMARIZE_TRIGGER,
 )
+from app.llm import generate_text
 from app.prompts import get as _get_prompt
-
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +44,9 @@ _TITLE_ASSISTANT_PREVIEW_LEN = 500
 async def maybe_summarize(
     db: AsyncSession,
     conversation: Conversation,
-    client,  # AsyncAnthropic — typed loosely to avoid an import cycle
     model: str,
 ) -> None:
-    """Compact the oldest 15 messages into `summary` (via Claude) when the
+    """Compact the oldest 15 messages into `summary` (via the LLM) when the
     array has grown past 20. Combines with the prior summary so memory
     accumulates across compactions.
 
@@ -66,14 +65,13 @@ async def maybe_summarize(
         transcript = f"PRIOR SUMMARY: {conversation.summary}\n\n{transcript}"
 
     try:
-        result = await client.messages.create(
-            model=model,
-            max_tokens=512,
-            system=_SUMMARIZE_PROMPT,
-            messages=[{"role": "user", "content": transcript}],
-        )
-        new_summary = "".join(
-            block.text for block in result.content if block.type == "text"
+        new_summary = (
+            await generate_text(
+                model=model,
+                system=_SUMMARIZE_PROMPT,
+                user=transcript,
+                max_output_tokens=512,
+            )
         ).strip()
     except Exception:
         logger.exception("conversation summarization failed")
@@ -93,27 +91,24 @@ async def maybe_summarize(
     conversation.messages = trimmed
 
     # Signal-based travel_persona refresh. The task opens its own session,
-    # runs a Haiku YES/NO gate against the user's current persona, and
+    # runs a cheap YES/NO gate against the user's current persona, and
     # rewrites it from recent summaries when warranted. Fire-and-forget so
     # the chat stream is never blocked.
     if conversation.user_id is not None:
         asyncio.create_task(
-            refresh_travel_persona(
-                conversation.user_id, new_summary, client, model
-            )
+            refresh_travel_persona(conversation.user_id, new_summary, model)
         )
 
 
 async def generate_title(
     db: AsyncSession,
     conversation: Conversation,
-    client,  # AsyncAnthropic — typed loosely to avoid an import cycle
     model: str,
     user_msg: str,
     assistant_msg: str,
 ) -> None:
     """Best-effort: replace the placeholder first-6-words title with a
-    Claude-summarized label after the first assistant turn finishes.
+    model-summarized label after the first assistant turn finishes.
 
     Caller invokes this only on conversation-creation turns (i.e., the row
     was just inserted in this request). Failures log and return; the
@@ -131,13 +126,12 @@ async def generate_title(
         "</conversation>"
     )
     try:
-        result = await client.messages.create(
+        raw = await generate_text(
             model=model,
-            max_tokens=_TITLE_MAX_TOKENS,
             system=_TITLE_PROMPT,
-            messages=[{"role": "user", "content": transcript}],
+            user=transcript,
+            max_output_tokens=_TITLE_MAX_TOKENS,
         )
-        raw = "".join(b.text for b in result.content if b.type == "text")
     except Exception:
         logger.exception("conversation title generation failed")
         return
@@ -157,7 +151,7 @@ async def generate_title(
 
 
 def _clean_title(raw: str) -> str:
-    """Strip the common ways Claude prefixes / wraps a one-line answer."""
+    """Strip the common ways the model prefixes / wraps a one-line answer."""
     s = raw.strip()
     # Take only the first line — model occasionally adds an explanation below.
     if "\n" in s:

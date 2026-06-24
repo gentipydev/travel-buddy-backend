@@ -18,6 +18,15 @@ Requires `pytest` and `pytest-asyncio` (configured via pytest.ini's
 """
 from __future__ import annotations
 
+import os
+
+# Ensure a truthy Gemini key before app.config's Settings singleton is
+# constructed (env vars take precedence over the .env file, which is left
+# empty for the developer to fill). Lets the FastAPI lifespan's
+# `validate_required_keys()` pass under TestClient; the genai client never
+# makes a real call in tests (it's monkeypatched).
+os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
+
 import asyncio
 from collections.abc import Callable
 from typing import Any
@@ -163,25 +172,25 @@ def fake_db() -> FakeSession:
 
 
 @pytest.fixture
-def fake_anthropic_stream(monkeypatch):
-    """Factory fixture: install a cassette-driven Anthropic stream.
+def fake_gemini_stream(monkeypatch):
+    """Factory fixture: install a cassette-driven Gemini stream.
 
-    Tests opt-in by calling `fake_anthropic_stream("chat_text_only")` (or
-    any cassette name under `tests/fakes/cassettes/`). After the call,
-    every `client.beta.prompt_caching.messages.stream(...)` invocation
-    inside the test returns a `FakeAnthropicStream` regardless of args —
-    so chat-agent tests can exercise the streaming, validation, and
-    SSE-emission paths without hitting Anthropic.
+    Tests opt-in by calling `fake_gemini_stream("chat_text_only")` (or any
+    cassette name under `tests/fakes/cassettes/`). After the call, every
+    `client.aio.models.generate_content_stream(...)` invocation inside the
+    test streams the recorded chunks regardless of args — so chat-agent
+    tests exercise the streaming, validation, and SSE-emission paths without
+    hitting the network.
 
     monkeypatch auto-rolls back after each test so cassettes don't leak.
     """
     from app import llm
-    from tests.fakes.fake_anthropic import make_stream
+    from tests.fakes.fake_gemini import make_stream
 
     def _install(cassette_name: str):
         factory = make_stream(cassette_name)
         monkeypatch.setattr(
-            llm.client.beta.prompt_caching.messages, "stream", factory
+            llm.client.aio.models, "generate_content_stream", factory
         )
 
     return _install

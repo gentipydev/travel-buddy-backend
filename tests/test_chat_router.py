@@ -12,9 +12,8 @@ Mocking strategy
   chat router to return a hand-built `ChatTurnContext`, skipping every
   DB / RAG / Cohere call.
 - `client` is monkey-patched on the chat_agent module so
-  `client.beta.prompt_caching.messages.stream(...)` returns a fake async
-  context manager that yields chosen text chunks via `text_stream` and a
-  chosen final message via `get_final_message()`.
+  `client.aio.models.generate_content_stream(...)` streams chosen text
+  chunks followed by a final chunk carrying any tool calls + usage.
 - FastAPI dependency overrides bypass `get_current_user` (chat requires
   a signed-in user since the cost-abuse hardening) and `get_session`
   (FakeSession, so the budget gates and usage recording in
@@ -53,15 +52,15 @@ from tests.conftest import FakeSession
 
 
 # ---------------------------------------------------------------------------
-# Fakes that quack like Anthropic types.
+# Fakes for the Gemini streaming surface.
 # ---------------------------------------------------------------------------
-# The chat agent only touches a small surface of the Anthropic SDK types:
-#   - `response.text_stream` async-iterable of strings
-#   - `response.get_final_message()` returning a Message with
-#     `.usage.input_tokens` / `.output_tokens` /
-#     `.cache_creation_input_tokens` / `.cache_read_input_tokens`,
-#     `.content` (list of text / tool_use blocks), `.stop_reason`.
-# SimpleNamespace duck-types all of it.
+# The chat agent reads `client.aio.models.generate_content_stream(...)` →
+# chunks with `.candidates[].content.parts[].text / .function_call` and a
+# final `.usage_metadata`. The carriers below stay Anthropic-flavored for
+# test ergonomics; `_fake_client` translates them into Gemini chunks via
+# `tests/fakes/fake_gemini`.
+
+from tests.fakes.fake_gemini import fake_genai_client, usage_metadata
 
 
 def _text_block(text: str) -> SimpleNamespace:
@@ -76,13 +75,13 @@ def _usage(
     *,
     input_tokens: int = 100,
     output_tokens: int = 200,
-    cache_creation_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,  # accepted but unused — Gemini has none
     cache_read_input_tokens: int = 0,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    """Build a Gemini `usage_metadata` object from Anthropic-style counts."""
+    return usage_metadata(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation_input_tokens,
         cache_read_input_tokens=cache_read_input_tokens,
     )
 
@@ -98,63 +97,20 @@ def _final_message(
     )
 
 
-class _FakeStreamResponse:
-    """Quacks like `client.beta.prompt_caching.messages.stream(...)`'s yielded response."""
-
-    def __init__(self, text_chunks: list[str], final_message: Any):
-        self._chunks = text_chunks
-        self._final = final_message
-
-    @property
-    def text_stream(self):
-        async def _gen():
-            for chunk in self._chunks:
-                yield chunk
-
-        return _gen()
-
-    async def __aiter__(self):
-        # Mirror the SDK's helper event stream: a `text` event per chunk,
-        # then one `input_json` event (full snapshot) per emit_itinerary
-        # tool_use so the agent's per-stop streaming path is exercised.
-        for chunk in self._chunks:
-            yield SimpleNamespace(type="text", text=chunk, snapshot=chunk)
-        for block in getattr(self._final, "content", []):
-            if getattr(block, "type", None) == "tool_use" and (
-                block.name == "emit_itinerary"
-            ):
-                yield SimpleNamespace(type="input_json", snapshot=block.input)
-
-    async def get_final_message(self):
-        return self._final
-
-
-class _FakeStreamCM:
-    """Async context manager wrapper — matches the SDK's stream() return shape."""
-
-    def __init__(self, response: _FakeStreamResponse):
-        self._response = response
-
-    async def __aenter__(self):
-        return self._response
-
-    async def __aexit__(self, exc_type, exc_val, tb):
-        return False
-
-
 def _fake_client(text_chunks: list[str], final_message: Any) -> SimpleNamespace:
     """Build a `client`-shaped namespace whose
-    `client.beta.prompt_caching.messages.stream(...)` returns our fake CM."""
-
-    def _stream(*_args, **_kwargs):
-        return _FakeStreamCM(_FakeStreamResponse(text_chunks, final_message))
-
-    return SimpleNamespace(
-        beta=SimpleNamespace(
-            prompt_caching=SimpleNamespace(
-                messages=SimpleNamespace(stream=_stream),
-            ),
-        ),
+    `client.aio.models.generate_content_stream(...)` streams `text_chunks`
+    then any tool calls + usage carried on `final_message`."""
+    tool_uses = [
+        {"name": b.name, "input": b.input}
+        for b in getattr(final_message, "content", [])
+        if getattr(b, "type", None) == "tool_use"
+    ]
+    return fake_genai_client(
+        text_chunks=text_chunks,
+        tool_uses=tool_uses,
+        usage=final_message.usage,
+        stop_reason=final_message.stop_reason,
     )
 
 
@@ -414,20 +370,18 @@ def test_invalid_itinerary_emits_itinerary_invalid(monkeypatch, client_authed):
 
 
 def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
-    """When the Anthropic call raises synchronously, the outer try/except
+    """When the Gemini call raises synchronously, the outer try/except
     yields `event: error\\ndata: <exc message>\\n\\n` and falls through
     without yielding `[DONE]`. The Flutter client treats absence of
     [DONE] + presence of `error` as a request-level failure."""
     _patch_prepare_turn(monkeypatch, _ctx())
 
     def _explode(*_args, **_kwargs):
-        raise RuntimeError("anthropic exploded")
+        raise RuntimeError("gemini exploded")
 
     fake = SimpleNamespace(
-        beta=SimpleNamespace(
-            prompt_caching=SimpleNamespace(
-                messages=SimpleNamespace(stream=_explode),
-            ),
+        aio=SimpleNamespace(
+            models=SimpleNamespace(generate_content_stream=_explode),
         ),
     )
     monkeypatch.setattr(chat_agent_module, "client", fake)
@@ -442,7 +396,7 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
     assert "error" in seq
     assert "[DONE]" not in (data for _, data in frames)
     err_data = next(d for e, d in frames if e == "error")
-    assert "anthropic exploded" in err_data
+    assert "gemini exploded" in err_data
 
 
 # ---------------------------------------------------------------------------
@@ -451,9 +405,10 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
 
 
 def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, caplog):
-    """`cache_creation_input_tokens` and `cache_read_input_tokens` ride on
-    `final.usage` and are emitted on the `RequestTrace` JSON log line.
-    This is what dashboards key off to compute cache hit rate."""
+    """`cache_read_input_tokens` rides on `usage_metadata` and is emitted on
+    the `RequestTrace` JSON log line — what dashboards key off to compute
+    cache hit rate. Gemini has no separate cache-creation billing, so
+    `cache_creation_input_tokens` is always 0."""
     _patch_prepare_turn(monkeypatch, _ctx())
     _patch_client(
         monkeypatch,
@@ -463,7 +418,6 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
             usage=_usage(
                 input_tokens=50,
                 output_tokens=100,
-                cache_creation_input_tokens=3000,
                 cache_read_input_tokens=1500,
             ),
         ),
@@ -479,7 +433,7 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
     assert trace_records, "expected a RequestTrace JSON log record"
 
     trace = json.loads(trace_records[-1].getMessage())
-    assert trace["cache_creation_input_tokens"] == 3000
+    assert trace["cache_creation_input_tokens"] == 0
     assert trace["cache_read_input_tokens"] == 1500
     assert trace["input_tokens"] == 50
     assert trace["output_tokens"] == 100
@@ -487,15 +441,14 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
     assert trace["itinerary_emitted"] is False
     assert trace["trip_refine"] is False
     # Stage telemetry (docs/07 item 4). `prepare_turn` is monkey-patched
-    # out, so context_assembly / rag_* are absent — anthropic_stream is
-    # the stage the real ChatAgent.stream() body still runs.
+    # out, so context_assembly / rag_* are absent — llm_stream is the stage
+    # the real ChatAgent.stream() body still runs.
     assert isinstance(trace["stage_latencies"], dict)
-    assert "anthropic_stream" in trace["stage_latencies"]
-    assert trace["stage_latencies"]["anthropic_stream"] > 0
-    # Cost derived from the patched usage at Haiku rates:
-    #   50 × $1.00/1M  + 100 × $5.00/1M
-    # + 3000 × $1.25/1M + 1500 × $0.10/1M  =  0.00445
-    assert trace["estimated_cost_usd"] == pytest.approx(0.00445)
+    assert "llm_stream" in trace["stage_latencies"]
+    assert trace["stage_latencies"]["llm_stream"] > 0
+    # Cost derived from the patched usage at gemini-3.5-flash rates:
+    #   50 × $0.30/1M + 100 × $2.50/1M + 1500 × $0.075/1M  =  0.0003775
+    assert trace["estimated_cost_usd"] == pytest.approx(0.0003775)
 
 
 def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_authed, caplog):

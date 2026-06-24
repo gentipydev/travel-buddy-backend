@@ -1,11 +1,12 @@
-"""Anthropic refine-tool registry.
+"""Refine-tool registry.
 
-`REFINE_TOOLS` is the list passed to
-`client.beta.prompt_caching.messages.stream(..., tools=...)` on refine turns. Order is only for prompt clarity; Anthropic
-doesn't care about the position of a tool within the list.
+`REFINE_TOOLS` is the list translated by `app.llm.to_gemini_tools` and
+passed as `config.tools` to `generate_content_stream(...)` on refine turns.
+Order is only for prompt clarity; the model doesn't care about the position
+of a tool within the list.
 
 `REFINE_TOOL_NAMES` is the set the chat router checks when filtering
-tool_use blocks out of the assistant's final message.
+function-call blocks out of the assistant's final message.
 
 `apply_refine_tool` is the validate-and-apply dispatcher; see
 `dispatcher.py`.
@@ -22,7 +23,7 @@ from app.tools.refine.update_stop import UPDATE_STOP_TOOL
 from app.tools.refine.update_trip import UPDATE_TRIP_TOOL
 
 
-# Order matters only for prompt clarity — Anthropic doesn't care.
+# Order matters only for prompt clarity — the model doesn't care.
 REFINE_TOOLS = [
     UPDATE_STOP_TOOL,
     INSERT_STOP_TOOL,

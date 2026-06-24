@@ -55,7 +55,7 @@ def _new_trace(*, user_id: str | None = None) -> RequestTrace:
         input_tokens=None,
         output_tokens=None,
         latency_ms=0.0,
-        model="claude-haiku-4-5-20251001",
+        model="gemini-3.5-flash",
         error=None,
     )
 
@@ -465,11 +465,11 @@ async def test_persist_failed_event_emitted_before_done(monkeypatch, fake_db):
 # ---------------------------------------------------------------------------
 
 
-async def test_anthropic_stream_stage_recorded_on_success_path(
+async def test_llm_stream_stage_recorded_on_success_path(
     monkeypatch, fake_db,
 ):
-    """The manual `_anthropic_start = time.perf_counter()` timer must record
-    a value > 0 once `async with client.beta.messages.stream(...)` closes."""
+    """The manual `_llm_start = time.perf_counter()` timer must record a
+    value > 0 once the `generate_content_stream(...)` loop finishes."""
     monkeypatch.setattr(
         chat_agent_module,
         "client",
@@ -488,8 +488,8 @@ async def test_anthropic_stream_stage_recorded_on_success_path(
         started_at=0.0,
     )
     await _drain(agent.stream())
-    assert "anthropic_stream" in trace.stage_latencies
-    assert trace.stage_latencies["anthropic_stream"] > 0
+    assert "llm_stream" in trace.stage_latencies
+    assert trace.stage_latencies["llm_stream"] > 0
 
 
 async def test_persistence_stage_only_records_when_conversation_present(
@@ -522,8 +522,9 @@ async def test_persistence_stage_only_records_when_conversation_present(
 async def test_estimated_cost_usd_derived_from_token_usage(
     monkeypatch, fake_db,
 ):
-    """compute_cost runs before log_trace and lands on self.trace. At Haiku
-    rates: 100 input × $1/1M + 200 output × $5/1M = 0.0011."""
+    """compute_cost runs before log_trace and lands on self.trace. At
+    gemini-3.5-flash rates: 100 input × $0.30/1M + 200 output × $2.50/1M
+    = 0.00053."""
     monkeypatch.setattr(
         chat_agent_module,
         "client",
@@ -545,7 +546,7 @@ async def test_estimated_cost_usd_derived_from_token_usage(
         started_at=0.0,
     )
     await _drain(agent.stream())
-    assert trace.estimated_cost_usd == pytest.approx(0.0011)
+    assert trace.estimated_cost_usd == pytest.approx(0.00053)
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +587,7 @@ def test_chat_agent_init_backfills_ctx_fields_on_trace(fake_db):
 
 
 # ---------------------------------------------------------------------------
-# Cassette-driven tests via `fake_anthropic_stream` fixture (conftest.py).
+# Cassette-driven tests via `fake_gemini_stream` fixture (conftest.py).
 #
 # These verify the same paths as the inline `_fake_client` tests above but
 # through the recorded-response cassette layer — the path the eval harness
@@ -596,7 +597,7 @@ def test_chat_agent_init_backfills_ctx_fields_on_trace(fake_db):
 
 
 async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
-    fake_anthropic_stream, monkeypatch, fake_db,
+    fake_gemini_stream, monkeypatch, fake_db,
 ):
     """The `chat_text_only` cassette has no tool calls and ~3120 cached
     input tokens. After the stream completes:
@@ -604,7 +605,7 @@ async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
     - no itinerary or trip_refined event
     - cache_read_input_tokens should land on the trace from `response.usage`
     """
-    fake_anthropic_stream("chat_text_only")
+    fake_gemini_stream("chat_text_only")
     # Persistence is out of scope for this test — stub the writer that
     # would otherwise need a real conversation row.
     monkeypatch.setattr(
@@ -644,7 +645,7 @@ async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
 
 
 async def test_chat_agent_emit_itinerary_cassette_emits_itinerary_event(
-    fake_anthropic_stream, monkeypatch, fake_db,
+    fake_gemini_stream, monkeypatch, fake_db,
 ):
     """The `chat_emit_itinerary` cassette pairs prose deltas with a valid
     `emit_itinerary` tool block (stops are in Albania so the geo validator
@@ -653,7 +654,7 @@ async def test_chat_agent_emit_itinerary_cassette_emits_itinerary_event(
     - emit `event: itinerary` with the validated payload
     - record itinerary_emitted=True + days count on the trace
     """
-    fake_anthropic_stream("chat_emit_itinerary")
+    fake_gemini_stream("chat_emit_itinerary")
     monkeypatch.setattr(
         chat_agent_module, "append_messages", AsyncMock(return_value=None)
     )

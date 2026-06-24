@@ -9,72 +9,76 @@ import pytest
 
 from app.observability.pricing import compute_cost
 
-_HAIKU = "claude-haiku-4-5-20251001"
-_SONNET = "claude-sonnet-4-6"
+_FLASH = "gemini-3.5-flash"
+_LITE = "gemini-2.5-flash-lite"
 
 
-def test_haiku_input_and_output_only():
-    # 100 input × $1.00/1M + 200 output × $5.00/1M
-    # = 0.0001 + 0.001 = 0.0011
+def test_flash_input_and_output_only():
+    # 100 input × $0.30/1M + 200 output × $2.50/1M
+    # = 0.00003 + 0.0005 = 0.00053
     cost = compute_cost(
-        model=_HAIKU,
+        model=_FLASH,
         input_tokens=100,
         output_tokens=200,
         cache_creation_input_tokens=None,
         cache_read_input_tokens=None,
     )
-    assert cost == pytest.approx(0.0011)
+    assert cost == pytest.approx(0.00053)
 
 
-def test_haiku_cache_tokens_contribute():
-    # 1000 cache_creation × $1.25/1M + 5000 cache_read × $0.10/1M
-    # = 0.00125 + 0.0005 = 0.00175 (plus 0 for input/output)
+def test_flash_cache_tokens_contribute():
+    # 1000 cache_creation × $0.30/1M + 5000 cache_read × $0.075/1M
+    # = 0.0003 + 0.000375 = 0.000675 (plus 0 for input/output)
     cost = compute_cost(
-        model=_HAIKU,
+        model=_FLASH,
         input_tokens=None,
         output_tokens=None,
         cache_creation_input_tokens=1000,
         cache_read_input_tokens=5000,
     )
-    assert cost == pytest.approx(0.00175)
+    assert cost == pytest.approx(0.000675)
 
 
-def test_haiku_all_four_categories_sum():
-    # 1M of each category at Haiku rates: 1.00 + 5.00 + 1.25 + 0.10 = 7.35
+def test_flash_all_four_categories_sum():
+    # 1M of each category at gemini-3.5-flash rates:
+    # 0.30 + 2.50 + 0.30 + 0.075 = 3.175
     cost = compute_cost(
-        model=_HAIKU,
+        model=_FLASH,
         input_tokens=1_000_000,
         output_tokens=1_000_000,
         cache_creation_input_tokens=1_000_000,
         cache_read_input_tokens=1_000_000,
     )
-    assert cost == pytest.approx(7.35)
+    assert cost == pytest.approx(3.175)
 
 
-def test_sonnet_rates_differ_from_haiku():
-    # Sonnet output is $15/1M; Haiku output is $5/1M. Same tokens, 3x cost.
-    haiku = compute_cost(
-        _HAIKU,
+def test_flash_lite_is_cheaper_than_flash():
+    # Flash-lite output is $0.40/1M; flash output is $2.50/1M — same tokens,
+    # the lite tier costs less.
+    flash = compute_cost(
+        _FLASH,
         input_tokens=0,
         output_tokens=1_000_000,
         cache_creation_input_tokens=None,
         cache_read_input_tokens=None,
     )
-    sonnet = compute_cost(
-        _SONNET,
+    lite = compute_cost(
+        _LITE,
         input_tokens=0,
         output_tokens=1_000_000,
         cache_creation_input_tokens=None,
         cache_read_input_tokens=None,
     )
-    assert sonnet == pytest.approx(haiku * 3)
+    assert flash == pytest.approx(2.50)
+    assert lite == pytest.approx(0.40)
+    assert lite < flash
 
 
 def test_unknown_model_returns_zero():
     # Telemetry must never crash on an unfamiliar SKU; an unknown model
     # is a signal to refresh `_PRICING`, not a request-path failure.
     cost = compute_cost(
-        model="claude-unreleased-xyz-99",
+        model="gemini-unreleased-xyz-99",
         input_tokens=1_000_000,
         output_tokens=1_000_000,
         cache_creation_input_tokens=1_000_000,
@@ -85,7 +89,7 @@ def test_unknown_model_returns_zero():
 
 def test_all_none_tokens_returns_zero():
     cost = compute_cost(
-        model=_HAIKU,
+        model=_FLASH,
         input_tokens=None,
         output_tokens=None,
         cache_creation_input_tokens=None,
@@ -97,11 +101,11 @@ def test_all_none_tokens_returns_zero():
 def test_none_in_one_field_treated_as_zero():
     # Only output_tokens populated; the three None fields contribute 0.
     cost = compute_cost(
-        model=_HAIKU,
+        model=_FLASH,
         input_tokens=None,
         output_tokens=500,
         cache_creation_input_tokens=None,
         cache_read_input_tokens=None,
     )
-    # 500 × $5.00 / 1M = 0.0025
-    assert cost == pytest.approx(0.0025)
+    # 500 × $2.50 / 1M = 0.00125
+    assert cost == pytest.approx(0.00125)

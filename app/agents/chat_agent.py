@@ -23,7 +23,9 @@ import asyncio
 import json
 import logging
 import time
+from types import SimpleNamespace
 
+from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -49,6 +51,9 @@ from app.llm import (
     assemble_chat_system,
     client,
     encode_sse_text,
+    extract_usage,
+    to_gemini_contents,
+    to_gemini_tools,
 )
 from app.observability import (
     RequestTrace,
@@ -251,16 +256,15 @@ class ChatAgent:
         # knows where to resume.
         preview_started: bool = False
         preview_emitted: int = 0
-        # Tool names Claude fired this turn — empty for plain chat,
+        # Tool names the model fired this turn — empty for plain chat,
         # `["emit_itinerary"]` for whole-trip create, one or more
         # `update_stop` / `insert_stop` / etc. for patch refine. Lands on
         # the Braintrust span so dashboards can filter/group by tool.
         tool_calls_for_span: list[str] = []
         # `chat_span` no-ops to a stand-in span when BRAINTRUST_ENABLED is
-        # false — the same `span.log(...)` calls below work unchanged.
-        # When enabled, every `client.beta.prompt_caching.messages.stream(...)`
-        # inside the block auto-emits a child span via `wrap_anthropic` at the
-        # client level, so the parent only logs request-scope context.
+        # false — the same `span.log(...)` calls below work unchanged. Token /
+        # latency metadata is logged explicitly on the parent span (Braintrust
+        # ships no Gemini auto-tracing wrapper; see `bt_wrap_genai`).
         with chat_span(name="chat_stream") as span:
             span.log(
                 input=(
@@ -305,280 +309,281 @@ class ChatAgent:
                     if ctx.refine_trip is not None
                     else [ITINERARY_TOOL]
                 )
-                # Prompt caching: the system payload is a 2-block list with the
-                # ~3-4k-token stable prefix marked as a cache breakpoint and the
-                # refine addendum + RAG context appended as an uncached suffix.
-                # In anthropic==0.39.0 the streaming entrypoint for prompt
-                # caching lives at `client.beta.prompt_caching.messages.stream`;
-                # the `anthropic-beta: prompt-caching-2024-07-31` header is
-                # injected by the SDK so we don't pass it ourselves. Cache token
-                # accounting (`cache_creation_input_tokens` /
-                # `cache_read_input_tokens`) ships back on `response.usage`.
-                system_payload = assemble_chat_system(
+                # Gemini takes the system prompt as a single
+                # `config.system_instruction` string (no per-block cache
+                # breakpoints — caching is implicit on 2.5+/3 models). The
+                # stable prefix is joined first so implicit caching can reuse
+                # it across turns; cache accounting comes back on
+                # `chunk.usage_metadata` and is mapped by `extract_usage`.
+                system_instruction = assemble_chat_system(
                     cached_prefix=ctx.cached_prefix,
                     volatile_suffix=ctx.volatile_suffix,
                 )
-                # Manual stage timer (not `with self.trace.stage(...)`) so the
-                # SSE-strict body inside the `async with` doesn't need to be
-                # re-indented. Recorded on success after `async with` exits;
-                # mid-stream exceptions fall through to the outer except and
-                # the partial duration is captured there.
-                _anthropic_start = time.perf_counter()
-                async with client.beta.prompt_caching.messages.stream(
-                    model=settings.model_chat,
+                gemini_tools = to_gemini_tools(available_tools)
+                contents = await to_gemini_contents(ctx.messages)
+                config = types.GenerateContentConfig(
+                    system_instruction=system_instruction,
                     # 8192 sits well above what the schema now allows
                     # (`MAX_STOPS_PER_DAY=3`, so ~12 days × 3 stops + the
-                    # intro/outro paragraph). Sizing was originally picked
-                    # for ~6 stops/day under the older prompt, but the
-                    # headroom is still useful — refine patch tools are
-                    # O(edit-size) and don't scale with trip size, and the
-                    # previous 2048 cap was hitting `stop_reason: max_tokens`
-                    # mid-tool-call, leaving `emit_itinerary` input with a
-                    # missing `days` field and triggering `itinerary_invalid`
-                    # ("days: Field required") on otherwise healthy plans.
-                    # We only pay for tokens actually generated, so the
-                    # ceiling is mostly free.
-                    max_tokens=8192,
-                    system=system_payload,
-                    messages=ctx.messages,
-                    tools=available_tools,
-                ) as response:
-                    # Iterate the full event stream (not just text_stream) so we
-                    # can watch the emit_itinerary tool input accumulate and drop
-                    # each stop onto the live map the moment it's complete — long
-                    # before the model finishes the prose. `input_json` events
-                    # carry `snapshot`, the partially-parsed tool input dict.
-                    async for event in response:
-                        etype = getattr(event, "type", None)
-                        if etype == "text":
-                            self._streamed_chars += len(event.text)
-                            yield encode_sse_text(event.text)
-                        elif etype == "input_json" and ctx.refine_trip is None:
-                            snap = event.snapshot
-                            if not isinstance(snap, dict):
-                                continue
-                            # All stops except the last parsed one are safely
-                            # complete (the last may still be streaming). The
-                            # trailing stop(s) are flushed after the final message.
-                            flat = _flatten_stops(snap)
-                            ready = flat[:-1] if len(flat) > 1 else []
-                            while preview_emitted < len(ready):
-                                s = ready[preview_emitted]
-                                preview_emitted += 1
-                                frame = await _stop_marker_frame(s, preview_emitted)
-                                if frame:
-                                    if not preview_started:
-                                        preview_started = True
-                                        yield "event: itinerary_stream_start\ndata: {}\n\n"
-                                    yield frame
-                    # Capture final message inside the context manager so the
-                    # accumulated state is still alive. Wrapped — token-count or
-                    # SDK-shape failures must not crash the request.
-                    try:
-                        final = await response.get_final_message()
-                        input_tokens = final.usage.input_tokens
-                        output_tokens = final.usage.output_tokens
-                        # Cache tokens only exist on the beta Usage variant; pull
-                        # them defensively so an SDK shape change can't crash the
-                        # request. Cache hit rate = read / (read + creation + input).
-                        cache_creation_input_tokens = getattr(
-                            final.usage, "cache_creation_input_tokens", None
+                    # intro/outro paragraph). The headroom is useful — refine
+                    # patch tools are O(edit-size) and don't scale with trip
+                    # size, and a too-low cap can truncate mid-tool-call,
+                    # leaving `emit_itinerary` with a missing `days` field and
+                    # triggering `itinerary_invalid`. We only pay for tokens
+                    # actually generated, so the ceiling is mostly free.
+                    max_output_tokens=8192,
+                    tools=gemini_tools,
+                    # We never let the SDK invoke tools — `emit_itinerary` and
+                    # the refine ops are terminal, rendered client-side — so
+                    # disable automatic function calling and read the
+                    # function_call parts off the stream ourselves.
+                    automatic_function_calling=(
+                        types.AutomaticFunctionCallingConfig(disable=True)
+                    ),
+                )
+                # Manual stage timer (not `with self.trace.stage(...)`) so the
+                # SSE-strict streaming body doesn't need to be re-indented.
+                # Recorded on success after the loop; mid-stream exceptions
+                # fall through to the outer except, capturing the partial
+                # duration there.
+                _llm_start = time.perf_counter()
+                # Gemini streams text deltas progressively but delivers the
+                # function call as a complete block (the Python SDK does not
+                # reliably stream partial tool args). So we accumulate text +
+                # any function_call parts here, then flush every itinerary
+                # stop onto the live map after the stream closes (below) using
+                # the validated payload — the live map populates in one burst
+                # rather than progressively, but the SSE contract is identical.
+                _text_parts: list[str] = []
+                function_calls: list[SimpleNamespace] = []
+                finish_reason = None
+                usage_meta = None
+                stream = await client.aio.models.generate_content_stream(
+                    model=settings.model_chat,
+                    contents=contents,
+                    config=config,
+                )
+                async for chunk in stream:
+                    for cand in getattr(chunk, "candidates", None) or []:
+                        fr = getattr(cand, "finish_reason", None)
+                        if fr is not None:
+                            finish_reason = fr
+                        cand_content = getattr(cand, "content", None)
+                        parts = (
+                            getattr(cand_content, "parts", None) or []
+                            if cand_content is not None
+                            else []
                         )
-                        cache_read_input_tokens = getattr(
-                            final.usage, "cache_read_input_tokens", None
-                        )
-                        assistant_text = "".join(
-                            b.text for b in final.content if b.type == "text"
-                        )
-                        # Stream emit_itinerary tool_use blocks as structured SSE
-                        # events, gated by a Pydantic validator. The Anthropic API
-                        # does not enforce the tool's input_schema, so a missing
-                        # field or out-of-enum kind would otherwise break the
-                        # Flutter parser mid-stream. On validation failure we emit
-                        # `event: itinerary_invalid` with a one-line reason instead
-                        # of a corrupt itinerary; the natural-language reply
-                        # already streamed and stays useful. Lands BEFORE [DONE]
-                        # because we're still inside the `async with`; the response
-                        # is alive and Starlette has not yet cancelled the
-                        # generator. Wrapped in the same try as the token-count
-                        # capture so a validator bug cannot crash the request.
-                        tool_use_blocks = [
-                            b for b in final.content if b.type == "tool_use"
-                        ]
-                        tool_calls_for_span = [b.name for b in tool_use_blocks]
-                        emit_block = next(
-                            (b for b in tool_use_blocks if b.name == "emit_itinerary"),
-                            None,
-                        )
-                        refine_blocks = [
-                            b for b in tool_use_blocks if b.name in REFINE_TOOL_NAMES
-                        ]
-
-                        if emit_block is not None:
-                            # Whole-trip rewrite path. If Claude also emitted patch
-                            # tools in the same turn (rare; the prompt discourages
-                            # it), we ignore them — emit_itinerary's full replace
-                            # supersedes any narrow op.
-                            _td_start = time.perf_counter()
-                            block = emit_block
-                            # Capture raw day count even on rejection — distinguishes
-                            # "Claude tried a 5-day plan we rejected" from "Claude
-                            # emitted no plan" in telemetry.
-                            raw_days = (
-                                block.input.get("days")
-                                if isinstance(block.input, dict)
-                                else None
-                            )
-                            if isinstance(raw_days, list):
-                                itinerary_days = len(raw_days)
-                            result = validate_itinerary(block.input)
-                            if result.ok:
-                                if ctx.refine_trip is not None:
-                                    # Refine path: apply the validated payload to
-                                    # the saved trip in-place and ship the canonical
-                                    # post-replace Trip back to the client. The
-                                    # inner try is required — the outer except
-                                    # below silently zeroes tokens, so a refine
-                                    # failure that fell through there would leave
-                                    # the client believing the refine succeeded.
-                                    # Commit BEFORE yielding `trip_refined` so the
-                                    # client's "this is the new state" trust is
-                                    # actually durable. The later `append_messages`
-                                    # path runs a second commit for the chat turn;
-                                    # if it fails we emit `persist_failed` (the
-                                    # trip stays refined — known split per plan).
-                                    try:
-                                        updated = await replace_trip_from_payload(
-                                            db,
-                                            trip_id=ctx.refine_trip.id,
-                                            user_id=ctx.refine_trip.user_id,
-                                            payload=result.payload,
-                                        )
-                                        await db.commit()
-                                        itinerary_emitted = True
-                                        yield (
-                                            "event: trip_refined\n"
-                                            f"data: {json.dumps(await serialize_trip(db, updated))}\n\n"
-                                        )
-                                    except Exception:
-                                        # Roll back any partial flush so the next
-                                        # statement (e.g. append_messages) starts
-                                        # in a clean transaction.
-                                        await db.rollback()
-                                        logger.exception("refine apply failed")
-                                        yield (
-                                            "event: refine_failed\n"
-                                            "data: " + json.dumps(
-                                                {"reason": "could not apply refinement"}
-                                            ) + "\n\n"
-                                        )
-                                else:
-                                    itinerary_emitted = True
-                                    # Flush stops the per-stop streamer held back
-                                    # (the trailing stop, plus any the partial
-                                    # parser never surfaced) using the validated
-                                    # payload — the canonical, complete plan.
-                                    final_flat = _flatten_stops(result.payload)
-                                    while preview_emitted < len(final_flat):
-                                        s = final_flat[preview_emitted]
-                                        preview_emitted += 1
-                                        frame = await _stop_marker_frame(
-                                            s, preview_emitted
-                                        )
-                                        if frame:
-                                            if not preview_started:
-                                                preview_started = True
-                                                yield (
-                                                    "event: itinerary_stream_start\n"
-                                                    "data: {}\n\n"
-                                                )
-                                            yield frame
-                                    yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
-                                    # Fallback only: if per-stop streaming yielded
-                                    # nothing mappable, geocode the whole trip
-                                    # after the stream closes (handled below).
-                                    itinerary_preview_payload = result.payload
-                            else:
-                                itinerary_validation_error = result.error
-                                # Surface raw input keys + stop_reason on the wire
-                                # so the Flutter client logs can distinguish "Claude
-                                # truncated mid-tool-call" (stop_reason=max_tokens,
-                                # missing days/stops) from "Claude emitted shape we
-                                # didn't expect" (stop_reason=tool_use, but with
-                                # bad enum/format). Cheap diagnostic — always-on.
-                                raw_keys = (
-                                    sorted(block.input.keys())
-                                    if isinstance(block.input, dict)
-                                    else None
-                                )
-                                error_payload = json.dumps({
-                                    "reason": result.error,
-                                    "stop_reason": getattr(final, "stop_reason", None),
-                                    "raw_keys": raw_keys,
-                                })
-                                yield f"event: itinerary_invalid\ndata: {error_payload}\n\n"
-                                logger.warning(
-                                    "itinerary validation failed: %s | stop_reason=%s | raw=%s",
-                                    result.error,
-                                    getattr(final, "stop_reason", None),
-                                    json.dumps(result.raw)[:1500],
-                                )
-                            self.trace.stage_latencies["tool_dispatch"] = (
-                                self.trace.stage_latencies.get("tool_dispatch", 0.0)
-                                + time.perf_counter() - _td_start
-                            )
-                        elif refine_blocks and ctx.refine_trip is not None:
-                            # Patch-tool refine path. Apply every tool call in
-                            # order within a single transaction; emit ONE
-                            # `trip_refined` with the canonical post-state once
-                            # all ops have landed. On any failure roll the whole
-                            # turn back — never half-apply.
-                            _td_start = time.perf_counter()
-                            try:
-                                latest = None
-                                for block in refine_blocks:
-                                    raw_input = (
-                                        block.input
-                                        if isinstance(block.input, dict)
-                                        else {}
+                        for part in parts:
+                            txt = getattr(part, "text", None)
+                            if txt:
+                                self._streamed_chars += len(txt)
+                                _text_parts.append(txt)
+                                yield encode_sse_text(txt)
+                            fc = getattr(part, "function_call", None)
+                            if fc is not None:
+                                function_calls.append(
+                                    SimpleNamespace(
+                                        name=fc.name,
+                                        input=dict(fc.args or {}),
                                     )
-                                    latest = await apply_refine_tool(
+                                )
+                    if getattr(chunk, "usage_metadata", None) is not None:
+                        usage_meta = chunk.usage_metadata
+                # Capture usage + dispatch tool calls. Wrapped — token-count
+                # or SDK-shape failures must not crash the request.
+                try:
+                    (
+                        input_tokens,
+                        output_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                    ) = extract_usage(usage_meta)
+                    assistant_text = "".join(_text_parts)
+                    stop_reason = (
+                        str(finish_reason) if finish_reason is not None else None
+                    )
+                    # Validate emit_itinerary tool calls with a Pydantic
+                    # validator before emitting `event: itinerary`. The model
+                    # is not forced to honor the tool schema, so a missing
+                    # field or out-of-enum kind would otherwise break the
+                    # Flutter parser mid-stream. On validation failure we emit
+                    # `event: itinerary_invalid` with a one-line reason; the
+                    # natural-language reply already streamed and stays useful.
+                    tool_use_blocks = function_calls
+                    tool_calls_for_span = [b.name for b in tool_use_blocks]
+                    emit_block = next(
+                        (b for b in tool_use_blocks if b.name == "emit_itinerary"),
+                        None,
+                    )
+                    refine_blocks = [
+                        b for b in tool_use_blocks if b.name in REFINE_TOOL_NAMES
+                    ]
+
+                    if emit_block is not None:
+                        # Whole-trip rewrite path. If the model also emitted
+                        # patch tools in the same turn (rare; the prompt
+                        # discourages it), we ignore them — emit_itinerary's
+                        # full replace supersedes any narrow op.
+                        _td_start = time.perf_counter()
+                        block = emit_block
+                        # Capture raw day count even on rejection — distinguishes
+                        # "model tried a 5-day plan we rejected" from "model
+                        # emitted no plan" in telemetry.
+                        raw_days = (
+                            block.input.get("days")
+                            if isinstance(block.input, dict)
+                            else None
+                        )
+                        if isinstance(raw_days, list):
+                            itinerary_days = len(raw_days)
+                        result = validate_itinerary(block.input)
+                        if result.ok:
+                            if ctx.refine_trip is not None:
+                                # Refine path: apply the validated payload to
+                                # the saved trip in-place and ship the canonical
+                                # post-replace Trip back to the client. The
+                                # inner try is required — the outer except
+                                # below silently zeroes tokens, so a refine
+                                # failure that fell through there would leave
+                                # the client believing the refine succeeded.
+                                # Commit BEFORE yielding `trip_refined` so the
+                                # client's "this is the new state" trust is
+                                # actually durable. The later `append_messages`
+                                # path runs a second commit for the chat turn;
+                                # if it fails we emit `persist_failed` (the
+                                # trip stays refined — known split per plan).
+                                try:
+                                    updated = await replace_trip_from_payload(
                                         db,
                                         trip_id=ctx.refine_trip.id,
                                         user_id=ctx.refine_trip.user_id,
-                                        name=block.name,
-                                        raw_input=raw_input,
+                                        payload=result.payload,
                                     )
-                                await db.commit()
+                                    await db.commit()
+                                    itinerary_emitted = True
+                                    yield (
+                                        "event: trip_refined\n"
+                                        f"data: {json.dumps(await serialize_trip(db, updated))}\n\n"
+                                    )
+                                except Exception:
+                                    # Roll back any partial flush so the next
+                                    # statement (e.g. append_messages) starts
+                                    # in a clean transaction.
+                                    await db.rollback()
+                                    logger.exception("refine apply failed")
+                                    yield (
+                                        "event: refine_failed\n"
+                                        "data: " + json.dumps(
+                                            {"reason": "could not apply refinement"}
+                                        ) + "\n\n"
+                                    )
+                            else:
                                 itinerary_emitted = True
-                                yield (
-                                    "event: trip_refined\n"
-                                    f"data: {json.dumps(await serialize_trip(db, latest))}\n\n"
-                                )
-                            except Exception as e:
-                                await db.rollback()
-                                logger.exception("refine patch apply failed")
-                                itinerary_validation_error = (
-                                    f"{type(e).__name__}: {e}"[:500]
-                                )
-                                yield (
-                                    "event: refine_failed\n"
-                                    "data: " + json.dumps(
-                                        {"reason": "could not apply refinement"}
-                                    ) + "\n\n"
-                                )
-                            self.trace.stage_latencies["tool_dispatch"] = (
-                                self.trace.stage_latencies.get("tool_dispatch", 0.0)
-                                + time.perf_counter() - _td_start
+                                # Flush every stop onto the live map using the
+                                # validated payload — the canonical, complete
+                                # plan. (Gemini delivers the tool call whole, so
+                                # this is where the markers stream.)
+                                final_flat = _flatten_stops(result.payload)
+                                while preview_emitted < len(final_flat):
+                                    s = final_flat[preview_emitted]
+                                    preview_emitted += 1
+                                    frame = await _stop_marker_frame(
+                                        s, preview_emitted
+                                    )
+                                    if frame:
+                                        if not preview_started:
+                                            preview_started = True
+                                            yield (
+                                                "event: itinerary_stream_start\n"
+                                                "data: {}\n\n"
+                                            )
+                                        yield frame
+                                yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
+                                # Fallback only: if per-stop streaming yielded
+                                # nothing mappable, geocode the whole trip
+                                # after the stream closes (handled below).
+                                itinerary_preview_payload = result.payload
+                        else:
+                            itinerary_validation_error = result.error
+                            # Surface raw input keys + finish_reason on the wire
+                            # so the Flutter client logs can distinguish "model
+                            # truncated mid-tool-call" (finish_reason=MAX_TOKENS,
+                            # missing days/stops) from "model emitted a shape we
+                            # didn't expect". Cheap diagnostic — always-on.
+                            raw_keys = (
+                                sorted(block.input.keys())
+                                if isinstance(block.input, dict)
+                                else None
                             )
-                    except Exception:
-                        input_tokens = None
-                        output_tokens = None
-                        cache_creation_input_tokens = None
-                        cache_read_input_tokens = None
-                        assistant_text = None
-                self.trace.stage_latencies["anthropic_stream"] = (
-                    time.perf_counter() - _anthropic_start
+                            error_payload = json.dumps({
+                                "reason": result.error,
+                                "stop_reason": stop_reason,
+                                "raw_keys": raw_keys,
+                            })
+                            yield f"event: itinerary_invalid\ndata: {error_payload}\n\n"
+                            logger.warning(
+                                "itinerary validation failed: %s | stop_reason=%s | raw=%s",
+                                result.error,
+                                stop_reason,
+                                json.dumps(result.raw)[:1500],
+                            )
+                        self.trace.stage_latencies["tool_dispatch"] = (
+                            self.trace.stage_latencies.get("tool_dispatch", 0.0)
+                            + time.perf_counter() - _td_start
+                        )
+                    elif refine_blocks and ctx.refine_trip is not None:
+                        # Patch-tool refine path. Apply every tool call in
+                        # order within a single transaction; emit ONE
+                        # `trip_refined` with the canonical post-state once
+                        # all ops have landed. On any failure roll the whole
+                        # turn back — never half-apply.
+                        _td_start = time.perf_counter()
+                        try:
+                            latest = None
+                            for block in refine_blocks:
+                                raw_input = (
+                                    block.input
+                                    if isinstance(block.input, dict)
+                                    else {}
+                                )
+                                latest = await apply_refine_tool(
+                                    db,
+                                    trip_id=ctx.refine_trip.id,
+                                    user_id=ctx.refine_trip.user_id,
+                                    name=block.name,
+                                    raw_input=raw_input,
+                                )
+                            await db.commit()
+                            itinerary_emitted = True
+                            yield (
+                                "event: trip_refined\n"
+                                f"data: {json.dumps(await serialize_trip(db, latest))}\n\n"
+                            )
+                        except Exception as e:
+                            await db.rollback()
+                            logger.exception("refine patch apply failed")
+                            itinerary_validation_error = (
+                                f"{type(e).__name__}: {e}"[:500]
+                            )
+                            yield (
+                                "event: refine_failed\n"
+                                "data: " + json.dumps(
+                                    {"reason": "could not apply refinement"}
+                                ) + "\n\n"
+                            )
+                        self.trace.stage_latencies["tool_dispatch"] = (
+                            self.trace.stage_latencies.get("tool_dispatch", 0.0)
+                            + time.perf_counter() - _td_start
+                        )
+                except Exception:
+                    input_tokens = None
+                    output_tokens = None
+                    cache_creation_input_tokens = None
+                    cache_read_input_tokens = None
+                    assistant_text = None
+                self.trace.stage_latencies["llm_stream"] = (
+                    time.perf_counter() - _llm_start
                 )
 
                 # Live map fallback: per-stop streaming above normally populates
@@ -649,13 +654,12 @@ class ChatAgent:
                                 await generate_title(
                                     db,
                                     ctx.conversation,
-                                    client,
                                     settings.model_title_gen,
                                     request.message,
                                     assistant_text,
                                 )
                             await maybe_summarize(
-                                db, ctx.conversation, client, settings.model_summarize
+                                db, ctx.conversation, settings.model_summarize
                             )
                         except Exception:
                             # Tokens already streamed live, but persistence failed —
@@ -667,16 +671,14 @@ class ChatAgent:
 
                 # Output guardrail — fail-open, observational only. The reply
                 # is already in the client's buffer; we are auditing, not
-                # blocking. Adds ~100-200 ms Haiku latency to [DONE] (the
+                # blocking. Adds ~100-200 ms LLM latency to [DONE] (the
                 # text is already rendered on the client — comparable to the
                 # persistence window above). Result is written to
                 # self.trace.output_guard_label before span.log() below.
                 if assistant_text:
                     with self.trace.stage("output_guardrail"):
                         try:
-                            label = await check_output_guardrail(
-                                assistant_text, client=client
-                            )
+                            label = await check_output_guardrail(assistant_text)
                             self.trace.output_guard_label = label
                         except Exception:
                             logger.warning(
@@ -692,7 +694,7 @@ class ChatAgent:
                 # output mirrors RequestTrace so dashboards across both
                 # sinks line up. The trace is mutated in place (router
                 # owns construction) so `stage_latencies` populated by the
-                # context_assembly / rag_* / anthropic_stream / tool_dispatch
+                # context_assembly / rag_* / llm_stream / tool_dispatch
                 # / persistence stages survives to here intact.
                 self.trace.input_tokens = input_tokens
                 self.trace.output_tokens = output_tokens

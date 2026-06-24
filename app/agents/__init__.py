@@ -2,9 +2,9 @@
 
 Today: `ChatAgent` (in `chat_agent.py`) — the streaming turn handler for
 `/chat/stream`. It owns:
-  - the `client.beta.prompt_caching.messages.stream(...)` call with the
-    cached system payload assembled by `app/llm/caching.assemble_chat_system`
-  - live `text_stream` forwarding as SSE `data:` frames
+  - the `client.aio.models.generate_content_stream(...)` call with the
+    system payload assembled by `app/llm/caching.assemble_chat_system`
+  - live text-delta forwarding as SSE `data:` frames
   - `emit_itinerary` validation + SSE emission (or `event: itinerary_invalid`
     on Pydantic failure)
   - refine-tool dispatch via `app.tools.refine.apply_refine_tool`,

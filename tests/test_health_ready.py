@@ -53,7 +53,7 @@ def test_readiness_200_when_db_reachable(monkeypatch):
     assert body["checks"]["database"]["error"] is None
     # Config presence is reported (bools), without any external call.
     config = body["checks"]["config"]
-    assert set(config.keys()) == {"anthropic", "cohere", "google"}
+    assert set(config.keys()) == {"gemini", "cohere", "google"}
     assert all(isinstance(v, bool) for v in config.values())
 
 

@@ -2,7 +2,7 @@
 
 `maybe_summarize` (in `summarization.py`) fires `refresh_travel_persona`
 as an `asyncio.create_task` whenever it compacts a new summary. The task
-opens its own DB session, runs a Haiku YES/NO gate against the user's
+opens its own DB session, runs a cheap YES/NO gate against the user's
 current persona, and rewrites the persona from recent summaries when
 warranted.
 
@@ -11,15 +11,15 @@ catches anything unexpected so a bug here cannot bubble into the event
 loop.
 """
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 
 from app.config import settings
 from app.db.engine import async_session
 from app.db.models import Conversation, UserPreferences
+from app.llm import generate_text
 from app.prompts import get as _get_prompt
-
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,8 @@ _PERSONA_REFRESH_SYSTEM = _get_prompt("persona.refresh_system").text
 async def _should_refresh_persona(
     summary: str,
     current_persona: str | None,
-    client,  # AsyncAnthropic — typed loosely to avoid an import cycle
 ) -> bool:
-    """Cheap Haiku gate: does `summary` reveal something new about the user
+    """Cheap YES/NO gate: does `summary` reveal something new about the user
     that the current persona doesn't already capture?
 
     Pure helper — caller owns the DB. Uses settings.model_persona_gate so
@@ -54,19 +53,15 @@ async def _should_refresh_persona(
         return True
 
     try:
-        response = await client.messages.create(
-            model=settings.model_persona_gate,
-            max_tokens=10,
-            system=_PERSONA_GATE_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": _PERSONA_GATE_USER.format(
+        answer = (
+            await generate_text(
+                model=settings.model_persona_gate,
+                system=_PERSONA_GATE_SYSTEM,
+                user=_PERSONA_GATE_USER.format(
                     persona=current_persona, summary=summary
                 ),
-            }],
-        )
-        answer = "".join(
-            b.text for b in response.content if b.type == "text"
+                max_output_tokens=10,
+            )
         ).strip().upper()
         return answer.startswith("YES")
     except Exception:
@@ -77,7 +72,6 @@ async def _should_refresh_persona(
 async def refresh_travel_persona(
     user_id: int,
     latest_summary: str,
-    client,  # AsyncAnthropic — typed loosely to avoid an import cycle
     model: str,
 ) -> None:
     """Fire-and-forget background task: enrich travel_persona from recent
@@ -104,7 +98,7 @@ async def refresh_travel_persona(
                 return
 
             if prefs.updated_at is not None:
-                age = datetime.now(timezone.utc) - prefs.updated_at
+                age = datetime.now(UTC) - prefs.updated_at
                 if age < _PERSONA_REFRESH_COOLDOWN:
                     logger.info(
                         "persona refresh skipped: prefs updated %.1fh ago "
@@ -116,9 +110,7 @@ async def refresh_travel_persona(
 
             current_persona = prefs.travel_persona
 
-            if not await _should_refresh_persona(
-                latest_summary, current_persona, client
-            ):
+            if not await _should_refresh_persona(latest_summary, current_persona):
                 return
 
             summaries_row = await db.execute(
@@ -136,20 +128,16 @@ async def refresh_travel_persona(
             transcript = "\n\n---\n\n".join(summaries)
 
             try:
-                response = await client.messages.create(
-                    model=model,
-                    max_tokens=_PERSONA_MAX_TOKENS,
-                    system=_PERSONA_REFRESH_SYSTEM,
-                    messages=[{
-                        "role": "user",
-                        "content": (
+                new_persona = (
+                    await generate_text(
+                        model=model,
+                        system=_PERSONA_REFRESH_SYSTEM,
+                        user=(
                             f"Existing persona: {current_persona or 'None set yet'}"
                             f"\n\nRecent conversation summaries:\n{transcript}"
                         ),
-                    }],
-                )
-                new_persona = "".join(
-                    b.text for b in response.content if b.type == "text"
+                        max_output_tokens=_PERSONA_MAX_TOKENS,
+                    )
                 ).strip()
             except Exception:
                 logger.exception(

@@ -2,8 +2,9 @@
 
 Three public callables:
   - `bt_init()` — set up the project logger. Call once at app startup.
-  - `bt_wrap_anthropic(client)` — wrap the Anthropic client so its calls
-    auto-trace as child spans.
+  - `bt_wrap_genai(client)` — hook point to wrap the Gemini client for
+    auto-tracing. Braintrust ships no genai wrapper today, so this is a
+    passthrough; kept so enabling it later is a one-line change here.
   - `chat_span(name)` — context manager yielding a Span (or a no-op
     stand-in when Braintrust is disabled) so callers use the same
     `span.log(...)` API in both modes.
@@ -26,12 +27,10 @@ logger = logging.getLogger(__name__)
 try:
     from braintrust import init_logger as _bt_init_logger
     from braintrust import start_span as _bt_start_span
-    from braintrust import wrap_anthropic as _bt_wrap_anthropic
     _BT_AVAILABLE = True
 except ImportError:
     _bt_init_logger = None
     _bt_start_span = None
-    _bt_wrap_anthropic = None
     _BT_AVAILABLE = False
 
 
@@ -59,19 +58,16 @@ def bt_init() -> None:
     _bt_init_logger(project=settings.braintrust_project)
 
 
-def bt_wrap_anthropic(client):
-    """Wrap an AsyncAnthropic client so its calls emit child spans.
+def bt_wrap_genai(client):
+    """Hook point to wrap the Gemini client for auto-tracing.
 
-    Returns the client unchanged when Braintrust is disabled or the SDK
-    is missing.
+    Braintrust ships no genai wrapper today (only OpenAI / Anthropic /
+    LiteLLM / OpenRouter), so this is a passthrough: the client is returned
+    unchanged in all modes. Kept as the single place to add wrapping if/when
+    a genai wrapper lands, so call sites don't change. The `chat_span`
+    parent span still captures token/latency metadata explicitly.
     """
-    if not _enabled():
-        return client
-    if not _BT_AVAILABLE:
-        _warn_missing_once()
-        return client
-    assert _bt_wrap_anthropic is not None
-    return _bt_wrap_anthropic(client)
+    return client
 
 
 class _NoopSpan:

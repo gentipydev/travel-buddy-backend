@@ -165,29 +165,32 @@ guarantees the API doesn't.
 
 The system prompt for `/chat/stream` is ~3-4k tokens of stable
 instructions: BASE persona + addenda + (optional) preferences block.
-That prefix barely changes within a chat session — so
-[`assemble_chat_system`](../app/llm/caching.py) wraps it with
-`cache_control: {"type": "ephemeral"}` and the chat agent passes
-`betas=["prompt-caching-2024-07-31"]` to
-`client.beta.messages.stream(...)`.
+That prefix barely changes within a chat session. Gemini caches
+**implicitly** on 2.5+/3 models — there is no per-request
+`cache_control` breakpoint API — so
+[`assemble_chat_system`](../app/llm/caching.py) simply joins the stable
+prefix and the per-turn volatile suffix into the single
+`config.system_instruction` string, **prefix first**. Implicit caching
+keys off the longest stable prefix, so keeping the stable text first is
+what still earns cache hits.
 
-**Cached prefix + volatile suffix.** The volatile half (the refine
+**Stable prefix + volatile suffix.** The volatile half (the refine
 addendum with its per-turn `trip_json`, plus any retrieved RAG context)
-is appended as a second, *uncached* block. That way trip-refine
-sessions still get a cache hit on the BASE + addenda prefix while their
+goes last so it never disturbs the cacheable prefix — trip-refine
+sessions still hit cache on the BASE + addenda prefix while their
 `trip_json` blob varies every turn.
 
 Hit-rate visibility: `RequestTrace`
 ([`observability/telemetry.py`](../app/observability/telemetry.py))
-captures `cache_creation_input_tokens` and `cache_read_input_tokens`
-from `response.usage`. Cache hit rate =
-`cache_read / (cache_read + cache_creation + input_tokens)`. Render's
-Logs UI can compute this as a derived metric.
+captures `cache_read_input_tokens` (mapped from Gemini's
+`cached_content_token_count` by `extract_usage`; Gemini has no separate
+cache-creation billing, so `cache_creation_input_tokens` is always 0).
+Cache hit rate = `cache_read / (cache_read + cache_creation +
+input_tokens)`. Render's Logs UI can compute this as a derived metric.
 
-Where caching does **not** pay off: `maybe_summarize`,
-`generate_title`, the persona refresh gate, and the manual
-`/preferences/persona` endpoint all use systems under ~300 tokens or
-are called rarely. The cache-write cost would exceed the savings.
+Note: `maybe_summarize`, `generate_title`, the persona refresh gate, and
+the manual `/preferences/persona` endpoint all use systems under ~300
+tokens or are called rarely, so caching is immaterial there.
 
 ## 5. Background tasks — persona refresh
 

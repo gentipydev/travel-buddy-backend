@@ -5,7 +5,11 @@ from supabase import acreate_client, AsyncClient
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", protected_namespaces=())
 
-    anthropic_api_key: str
+    # Google Gemini Developer API key (the LLM provider for chat + all
+    # auxiliary calls). DISTINCT from `google_api_key` below, which is the
+    # Google Maps Platform key — they are separate credentials on separate
+    # APIs and must not be shared.
+    gemini_api_key: str
     cohere_api_key: str | None = None
 
     # Braintrust observability — LLM trace logging + scorer evals.
@@ -26,14 +30,18 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/travel_buddy"
     allowed_origins: str = "http://localhost:3000"
 
-    model_chat: str = "claude-haiku-4-5-20251001"
+    # Gemini 3.5 Flash — the chat model. Verified against the live model list
+    # (`models/gemini-3.5-flash`); the API 404s on a bad id, so override
+    # MODEL_CHAT in .env only with an id ListModels reports for your key.
+    model_chat: str = "gemini-3.5-flash"
     # Auxiliary call sites — the persona YES/NO gate, conversation title
     # generation, and rolling summarization. Held separate so a future
     # model_chat upgrade doesn't silently make these cheap/frequent calls
-    # expensive. Defaults match model_chat; override in .env for A/B tests.
-    model_persona_gate: str = "claude-haiku-4-5-20251001"
-    model_title_gen: str = "claude-haiku-4-5-20251001"
-    model_summarize: str = "claude-haiku-4-5-20251001"
+    # expensive. Defaults match model_chat; override in .env (e.g. a cheaper
+    # flash-lite tier) for A/B tests.
+    model_persona_gate: str = "gemini-3.5-flash"
+    model_title_gen: str = "gemini-3.5-flash"
+    model_summarize: str = "gemini-3.5-flash"
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
@@ -116,12 +124,12 @@ class Settings(BaseSettings):
     def validate_required_keys(self) -> list[str]:
         # Pydantic already rejects literally-missing required fields, but an
         # empty string passes its `str` check and then fails at first use
-        # (e.g. anthropic_api_key="" → 401 on the first stream). Listing the
+        # (e.g. gemini_api_key="" → 4xx on the first stream). Listing the
         # truthy-required keys here fails fast in `lifespan` instead, with all
         # missing keys reported at once for a faster ops loop.
         missing = [
             key for key in (
-                "anthropic_api_key",
+                "gemini_api_key",
                 "supabase_url",
                 "supabase_anon_key",
                 "supabase_service_key",

@@ -1,10 +1,10 @@
 # Architecture
 
 Travel Buddy is a FastAPI backend that powers an Albania-first AI
-travel assistant. It speaks SSE to a Flutter client, streams Anthropic
-Claude responses with tool use, and persists trips + conversations into
+travel assistant. It speaks SSE to a Flutter client, streams Google
+Gemini responses with tool use, and persists trips + conversations into
 Supabase (Postgres + Auth + Storage). The package layout is organized
-around **what each module talks to** — `llm/` talks to Anthropic,
+around **what each module talks to** — `llm/` talks to Gemini,
 `integrations/` talks to Google + Cohere + Supabase Storage, `agents/`
 composes the LLM + the tools + the domain into a streaming turn, and so
 on.
@@ -16,8 +16,8 @@ app/
 ├── routers/         HTTP surface. Thin shells around domain + agents.
 ├── agents/          Multi-step LLM orchestration. Owns the streaming loop.
 ├── prompts/         Single source of truth for every system prompt.
-├── tools/           Claude tool-use schemas + validators + dispatchers.
-├── llm/             Anthropic client, prompt-caching helpers, SSE encoding.
+├── tools/           tool-use schemas + validators + dispatchers.
+├── llm/             Gemini client + adapters, system-prompt helpers, SSE encoding.
 ├── rag/             Embedding + reranking + retrieval + place detection.
 ├── integrations/    Third-party APIs (Google Maps, Cohere, Supabase Storage).
 ├── domain/          Business logic — trips and conversations.
@@ -45,9 +45,9 @@ exclusively call into `domain/` / `agents/`; they never reach into
 [`chat_agent.py`](../app/agents/chat_agent.py)) is the one entry point
 today. It owns:
 
-- `client.beta.messages.stream(...)` with the cached system payload from
-  `app/llm/caching.assemble_chat_system`
-- live `text_stream` forwarding as SSE `data:` frames
+- `client.aio.models.generate_content_stream(...)` with the system payload
+  from `app/llm/caching.assemble_chat_system`
+- live text-delta forwarding as SSE `data:` frames
 - `emit_itinerary` validation + SSE emission (or
   `event: itinerary_invalid` on Pydantic failure)
 - refine-tool dispatch via `app.tools.refine.apply_refine_tool`,
@@ -68,10 +68,10 @@ is what evals pin to.
 The `builders.py` module exposes
 [`build_system_payload(prefs, trip_context)`](../app/prompts/builders.py)
 which returns `(cached_prefix, volatile_suffix)` — the chat agent feeds
-those to `assemble_chat_system` for the Anthropic prompt-caching
-payload.
+those to `assemble_chat_system`, which joins them into the single
+`system_instruction` string Gemini takes.
 
-### `tools/` — Claude tool-use schemas
+### `tools/` — tool-use schemas
 
 Two flavours:
 
@@ -79,7 +79,7 @@ Two flavours:
   `emit_itinerary` full-plan emission tool, offered on every chat turn.
   Validated by
   [`itinerary_validator.py`](../app/tools/itinerary_validator.py) (the
-  Anthropic API does not enforce input_schema).
+  model is not forced to honor the schema, so we validate before emit).
 - [`refine/`](../app/tools/refine/): seven surgical patch tools
   (`update_stop`, `insert_stop`, `delete_stop`, `reorder_stops`,
   `add_day`, `delete_day`, `update_trip`) offered only on refine turns
@@ -91,13 +91,15 @@ Two flavours:
 
 ### `llm/` — model layer
 
-- [`anthropic_client.py`](../app/llm/anthropic_client.py): the shared
-  `AsyncAnthropic` singleton.
-- [`caching.py`](../app/llm/caching.py): builds a 2-block system
-  payload with a `cache_control: ephemeral` marker on the stable
-  prefix. The beta endpoint
-  (`client.beta.messages.stream(..., betas=[PROMPT_CACHING_BETA])`) is
-  required in `anthropic==0.39.0`.
+- [`gemini_client.py`](../app/llm/gemini_client.py): the shared
+  `genai.Client` singleton + the `generate_text` one-shot helper.
+- [`gemini_adapter.py`](../app/llm/gemini_adapter.py): translates the
+  app's Anthropic-shaped data to the SDK — `to_gemini_contents` (messages,
+  fetching + inlining image URLs), `to_gemini_tools` (JSON Schema →
+  `types.Schema`), `extract_usage` (token accounting).
+- [`caching.py`](../app/llm/caching.py): joins the stable prefix +
+  volatile suffix into the single `system_instruction` string Gemini
+  takes (Gemini caches implicitly — no per-block `cache_control` marker).
 - [`streaming.py`](../app/llm/streaming.py): `encode_sse_text` —
   serializes streamed text into SSE `data:` frames (escapes embedded
   newlines so multi-line chunks stay one event).
@@ -195,19 +197,21 @@ POST /chat/stream
            │
            ├── yield "event: conversation_id" (if new)
            ├── yield "event: place_card" (if place detected)
-           ├── system_payload = assemble_chat_system(cached_prefix, volatile_suffix)
-           │       (llm/caching → list[TextBlockParam] with cache_control)
+           ├── system_instruction = assemble_chat_system(cached_prefix, volatile_suffix)
+           │       (llm/caching → single string; Gemini caches implicitly)
            │
-           ├── async with client.beta.messages.stream(
-           │     system=system_payload,
-           │     tools=[ITINERARY_TOOL, *REFINE_TOOLS?],
-           │     betas=[PROMPT_CACHING_BETA],
-           │   ):
-           │     async for text in response.text_stream:
-           │         yield encode_sse_text(text)       (llm/streaming)
-           │
-           │     final = await response.get_final_message()
-           │     cache_*_tokens = final.usage.cache_*_input_tokens
+           ├── stream = await client.aio.models.generate_content_stream(
+           │     contents=to_gemini_contents(messages),
+           │     config=GenerateContentConfig(
+           │         system_instruction=system_instruction,
+           │         tools=to_gemini_tools([ITINERARY_TOOL, *REFINE_TOOLS?]),
+           │     ),
+           │   )
+           │   async for chunk in stream:
+           │     for part in chunk.candidates[].content.parts:
+           │         if part.text: yield encode_sse_text(part.text)  (llm/streaming)
+           │         if part.function_call: collect it
+           │     usage_meta = chunk.usage_metadata  (→ extract_usage)
            │
            │     if emit_itinerary block:
            │         validate_itinerary (tools/itinerary_validator)

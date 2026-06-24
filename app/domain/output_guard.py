@@ -12,14 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
 
 from app.config import settings
+from app.llm import generate_text
 from app.observability.request_context import trace_var
 from app.prompts import get as get_prompt
-
-if TYPE_CHECKING:
-    from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +38,13 @@ def _mark_failed_open() -> None:
         pass
 
 
-async def check_output_guardrail(text: str, *, client: AsyncAnthropic) -> str:
+async def check_output_guardrail(text: str) -> str:
     """Return "safe" or "review". Never raises.
 
-    Calls Haiku with the `output_guard.system` prompt. Response is a single
-    token: "SAFE" or "REVIEW". Any failure path (timeout, API error, empty
-    response, unexpected token) returns "safe" — fail-open is the contract.
+    Calls the model with the `output_guard.system` prompt. Response is a
+    single token: "SAFE" or "REVIEW". Any failure path (timeout, API error,
+    empty response, unexpected token) returns "safe" — fail-open is the
+    contract.
 
     The result is telemetry only; the reply has already streamed to the
     client before this function is called.
@@ -55,23 +53,22 @@ async def check_output_guardrail(text: str, *, client: AsyncAnthropic) -> str:
         return "safe"
     try:
         system_prompt = get_prompt("output_guard.system").text
-        response = await asyncio.wait_for(
-            client.messages.create(
-                model=settings.model_chat,
-                max_tokens=8,
-                system=system_prompt,
-                messages=[{"role": "user", "content": text}],
-            ),
-            timeout=_GUARD_TIMEOUT_SECONDS,
-        )
         label_raw = (
-            getattr(response.content[0], "text", "") if response.content else ""
+            await asyncio.wait_for(
+                generate_text(
+                    model=settings.model_chat,
+                    system=system_prompt,
+                    user=text,
+                    max_output_tokens=8,
+                ),
+                timeout=_GUARD_TIMEOUT_SECONDS,
+            )
         ).strip().upper()
         return "review" if label_raw == "REVIEW" else "safe"
     except TimeoutError:
         _mark_failed_open()
         logger.warning(
-            "output_guardrail: Haiku call timed out after %.1fs — fail open",
+            "output_guardrail: LLM call timed out after %.1fs — fail open",
             _GUARD_TIMEOUT_SECONDS,
         )
         return "safe"

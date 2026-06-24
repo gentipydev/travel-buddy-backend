@@ -38,7 +38,7 @@ async def readiness():
     touches Postgres can succeed. API-key presence is reported but does NOT
     fail readiness: a missing COHERE_API_KEY degrades retrieval to
     lexical-only (still serviceable), and Google keys are kill-switchable.
-    Only `anthropic` is functionally required, so it's surfaced but the
+    Only `gemini` is functionally required, so it's surfaced but the
     instance is still "ready" enough to serve health/static endpoints — the
     DB gate is the operational signal an orchestrator should act on.
     """
@@ -59,7 +59,7 @@ async def readiness():
         logger.warning("readiness: DB check failed: %s", db_error)
 
     config = {
-        "anthropic": bool(settings.anthropic_api_key),
+        "gemini": bool(settings.gemini_api_key),
         "cohere": bool(settings.cohere_api_key),
         "google": bool(settings.google_api_key),
     }

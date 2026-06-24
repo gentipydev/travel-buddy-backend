@@ -1,6 +1,6 @@
 # Travel Buddy — Backend
 
-FastAPI + async SQLAlchemy + Anthropic Claude + Cohere + Supabase. The
+FastAPI + async SQLAlchemy + Google Gemini + Cohere + Supabase. The
 backend for an Albania-first AI travel assistant: streaming chat with
 tool use, surgical trip refinement, RAG over curated Albanian content,
 and post-save enrichment via Google Maps. Powers a Flutter mobile app.
@@ -12,8 +12,8 @@ app/
 ├── routers/         HTTP surface — thin shells around domain + agents
 ├── agents/          Multi-step LLM orchestration (streaming chat agent)
 ├── prompts/         Versioned prompt registry + .md prompt bodies
-├── tools/           Claude tool-use schemas + validators + refine dispatcher
-├── llm/             Anthropic client, prompt-caching helpers, SSE encoding
+├── tools/           tool-use schemas + validators + refine dispatcher
+├── llm/             Gemini client + adapters, system-prompt helpers, SSE encoding
 ├── rag/             Cohere embed + rerank + adaptive retrieval routing
 ├── integrations/    Google Maps (Places + Directions + Static Maps),
 │                    Cohere client, Supabase Storage
@@ -58,7 +58,7 @@ Each pattern links to working code:
 ```bash
 # 1. Configure
 cp .env.example .env
-# Fill in ANTHROPIC_API_KEY, COHERE_API_KEY, SUPABASE_URL,
+# Fill in GEMINI_API_KEY, COHERE_API_KEY, SUPABASE_URL,
 # SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY, DATABASE_URL,
 # GOOGLE_API_KEY, GOOGLE_URL_SIGNING_SECRET.
 # Every variable lives in `.env.example` with an inline comment.

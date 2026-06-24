@@ -2,11 +2,11 @@ import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from google.genai import types
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.llm import client
 from app.db.engine import get_session
 from app.db.models import User, UserPreferences
 from app.deps import require_local_user
@@ -15,6 +15,7 @@ from app.domain.usage_budget import (
     check_user_budget,
     record_usage,
 )
+from app.llm import client, extract_usage
 from app.observability import compute_cost
 from app.prompts import get as _get_prompt
 from app.rate_limit import limiter, user_or_ip_key
@@ -99,8 +100,8 @@ async def generate_persona(
     user: User = Depends(require_local_user),
     db: AsyncSession = Depends(get_session),
 ):
-    # Per-user 10/hour ceiling. The endpoint makes a non-cached Claude
-    # call (~300 input + 512 output tokens on Haiku) and is normally hit
+    # Per-user 10/hour ceiling. The endpoint makes a non-cached LLM
+    # call (~300 input + 512 output tokens) and is normally hit
     # 0-2× per session, so the ceiling is hard to reach legitimately;
     # the limit catches a misbehaving client or a credentials leak before
     # it racks up serious cost. `Request` is in the signature because
@@ -127,22 +128,25 @@ async def generate_persona(
     prefs.travel_persona = saved_persona
 
     started = time.perf_counter()
-    response = await client.messages.create(
+    response = await client.aio.models.generate_content(
         model=settings.model_chat,
-        max_tokens=512,
-        system=PERSONA_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prefs_text}],
+        contents=prefs_text,
+        config=types.GenerateContentConfig(
+            system_instruction=PERSONA_SYSTEM_PROMPT,
+            max_output_tokens=512,
+        ),
     )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
-    new_persona = "".join(
-        b.text for b in response.content if b.type == "text"
-    ).strip()
+    new_persona = (response.text or "").strip()
+    in_tok, out_tok, _cache_creation, cache_read = extract_usage(
+        getattr(response, "usage_metadata", None)
+    )
     logger.info(
-        "anthropic.persona_generated",
+        "gemini.persona_generated",
         extra={
             "model": settings.model_chat,
-            "input_tokens": getattr(response.usage, "input_tokens", None),
-            "output_tokens": getattr(response.usage, "output_tokens", None),
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
             "duration_ms": elapsed_ms,
             "persona_chars": len(new_persona),
         },
@@ -157,19 +161,18 @@ async def generate_persona(
 
     # Fail-soft usage accounting into `usage_daily` (same ledger the
     # budget gates above read).
-    in_tok = getattr(response.usage, "input_tokens", None)
-    out_tok = getattr(response.usage, "output_tokens", None)
     await record_usage(
         db,
         str(user.supabase_uid),
-        input_tokens=in_tok or 0,
-        output_tokens=out_tok or 0,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cache_read_input_tokens=cache_read,
         estimated_cost_usd=compute_cost(
             model=settings.model_chat,
             input_tokens=in_tok,
             output_tokens=out_tok,
-            cache_creation_input_tokens=None,
-            cache_read_input_tokens=None,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=cache_read,
         ),
     )
 

@@ -1,29 +1,34 @@
-"""LLM layer: model clients, prompt-caching helpers, streaming primitives.
+"""LLM layer: model client, prompt-system helpers, streaming primitives.
 
-This package owns every interaction with the Anthropic API surface:
+This package owns every interaction with the Google Gemini API surface:
 
-  - `anthropic_client.client` — the shared AsyncAnthropic singleton
-  - `caching.assemble_chat_system` — builds a `list[TextBlockParam]` system
-    payload with cache_control markers on the stable prefix
+  - `gemini_client.client` — the shared `genai.Client` singleton
+  - `gemini_client.generate_text` — one-shot system+user → text helper for
+    the non-streaming auxiliary call sites
+  - `gemini_adapter` — `to_gemini_contents` / `to_gemini_tools` /
+    `extract_usage` translate the app's Anthropic-shaped data to the SDK
+  - `caching.assemble_chat_system` — joins the system prompt into the single
+    `system_instruction` string Gemini takes (no per-block cache markers)
   - `streaming.encode_sse_text` — serializes streamed text into SSE frames
 
 The `app/agents/` and `app/domain/` layers depend on this package; nothing
 in here depends on either. That keeps the model-API surface in one place.
 """
-from app.llm.anthropic_client import client
-from app.llm.caching import (
-    EPHEMERAL,
-    assemble_chat_system,
-    cached_text,
-    plain_text,
+from app.llm.caching import assemble_chat_system
+from app.llm.gemini_adapter import (
+    extract_usage,
+    to_gemini_contents,
+    to_gemini_tools,
 )
+from app.llm.gemini_client import client, generate_text
 from app.llm.streaming import encode_sse_text
 
 __all__ = [
-    "EPHEMERAL",
     "assemble_chat_system",
-    "cached_text",
     "client",
     "encode_sse_text",
-    "plain_text",
+    "extract_usage",
+    "generate_text",
+    "to_gemini_contents",
+    "to_gemini_tools",
 ]

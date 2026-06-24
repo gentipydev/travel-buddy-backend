@@ -37,7 +37,7 @@ def _new_trace(**overrides) -> RequestTrace:
         input_tokens=None,
         output_tokens=None,
         latency_ms=0.0,
-        model="claude-haiku-4-5-20251001",
+        model="gemini-3.5-flash",
         error=None,
     )
     base.update(overrides)
@@ -101,17 +101,18 @@ def test_log_trace_populates_cache_hit_ratio_on_emit(caplog):
 # --------------------------------------------------------------------------- #
 
 
-async def test_output_guard_sets_failed_open_flag_on_error():
+async def test_output_guard_sets_failed_open_flag_on_error(monkeypatch):
     """When the guard fails open (API error), it flags the ambient trace so
     the outage is visible — and still returns "safe" (contract preserved)."""
-    from app.domain.output_guard import check_output_guardrail
+    from app.domain import output_guard as guard_module
 
     trace = _new_trace()
     token = trace_var.set(trace)
     try:
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(side_effect=Exception("api down"))
-        result = await check_output_guardrail("some reply", client=mock_client)
+        monkeypatch.setattr(
+            guard_module, "generate_text", AsyncMock(side_effect=Exception("api down"))
+        )
+        result = await guard_module.check_output_guardrail("some reply")
     finally:
         trace_var.reset(token)
 
@@ -119,17 +120,18 @@ async def test_output_guard_sets_failed_open_flag_on_error():
     assert trace.output_guard_failed_open is True
 
 
-async def test_output_guard_sets_failed_open_flag_on_timeout():
+async def test_output_guard_sets_failed_open_flag_on_timeout(monkeypatch):
     import asyncio
 
-    from app.domain.output_guard import check_output_guardrail
+    from app.domain import output_guard as guard_module
 
     trace = _new_trace()
     token = trace_var.set(trace)
     try:
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(side_effect=asyncio.TimeoutError)
-        result = await check_output_guardrail("reply", client=mock_client)
+        monkeypatch.setattr(
+            guard_module, "generate_text", AsyncMock(side_effect=asyncio.TimeoutError)
+        )
+        result = await guard_module.check_output_guardrail("reply")
     finally:
         trace_var.reset(token)
 
@@ -137,23 +139,18 @@ async def test_output_guard_sets_failed_open_flag_on_timeout():
     assert trace.output_guard_failed_open is True
 
 
-async def test_output_guard_does_not_flag_failed_open_on_success():
+async def test_output_guard_does_not_flag_failed_open_on_success(monkeypatch):
     """A genuine "safe" judgment must NOT set the fail-open flag — otherwise
     the signal is useless."""
-    from unittest.mock import MagicMock
-
-    from app.domain.output_guard import check_output_guardrail
+    from app.domain import output_guard as guard_module
 
     trace = _new_trace()
     token = trace_var.set(trace)
     try:
-        block = MagicMock()
-        block.text = "SAFE"
-        resp = MagicMock()
-        resp.content = [block]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=resp)
-        result = await check_output_guardrail("reply", client=mock_client)
+        monkeypatch.setattr(
+            guard_module, "generate_text", AsyncMock(return_value="SAFE")
+        )
+        result = await guard_module.check_output_guardrail("reply")
     finally:
         trace_var.reset(token)
 
@@ -161,13 +158,14 @@ async def test_output_guard_does_not_flag_failed_open_on_success():
     assert trace.output_guard_failed_open is False
 
 
-async def test_output_guard_failed_open_noop_without_trace():
+async def test_output_guard_failed_open_noop_without_trace(monkeypatch):
     """No ambient trace (direct unit call) → the guard still fails open
     without raising; the flag simply has nowhere to land."""
-    from app.domain.output_guard import check_output_guardrail
+    from app.domain import output_guard as guard_module
 
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(side_effect=Exception("boom"))
+    monkeypatch.setattr(
+        guard_module, "generate_text", AsyncMock(side_effect=Exception("boom"))
+    )
     # trace_var is unset here.
-    result = await check_output_guardrail("reply", client=mock_client)
+    result = await guard_module.check_output_guardrail("reply")
     assert result == "safe"

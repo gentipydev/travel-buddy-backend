@@ -22,7 +22,7 @@ import asyncio
 import logging
 
 from app.config import settings
-from app.llm import client
+from app.llm import generate_text
 from app.prompts import get as get_prompt
 
 logger = logging.getLogger(__name__)
@@ -64,23 +64,20 @@ async def rewrite_query(query: str, history: list[dict] | None = None) -> str:
         return query
     try:
         system_prompt = get_prompt("query_rewrite.system").text
-        response = await asyncio.wait_for(
-            client.messages.create(
-                model=settings.model_chat,
-                max_tokens=_REWRITE_MAX_TOKENS,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": _build_user_content(query, history)}
-                ],
-            ),
-            timeout=_REWRITE_TIMEOUT_SECONDS,
-        )
-        rewritten = "".join(
-            b.text for b in response.content if b.type == "text"
+        rewritten = (
+            await asyncio.wait_for(
+                generate_text(
+                    model=settings.model_chat,
+                    system=system_prompt,
+                    user=_build_user_content(query, history),
+                    max_output_tokens=_REWRITE_MAX_TOKENS,
+                ),
+                timeout=_REWRITE_TIMEOUT_SECONDS,
+            )
         ).strip()
     except TimeoutError:
         logger.warning(
-            "query_rewrite: Haiku call timed out after %.1fs — using original",
+            "query_rewrite: LLM call timed out after %.1fs — using original",
             _REWRITE_TIMEOUT_SECONDS,
         )
         return query

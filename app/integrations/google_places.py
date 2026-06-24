@@ -75,7 +75,7 @@ class EnrichmentResult:
     source: Literal["curated", "cache", "fresh"]
 
 
-# Module-level singleton mirrors `app/llm/anthropic_client.py` and
+# Module-level singleton mirrors `app/llm/gemini_client.py` and
 # `app/integrations/cohere_client.py`: keep one connection pool warm
 # instead of paying ~30 ms of TLS + client init per enrichment call.
 # Lives for the lifetime of the process; FastAPI's shutdown doesn't
