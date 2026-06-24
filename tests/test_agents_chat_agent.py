@@ -206,8 +206,13 @@ async def test_emit_itinerary_streams_per_stop_markers(monkeypatch, fake_db):
         "days": [
             {
                 "day_number": 1,
+                "title": "Old Town & history",
                 "stops": [
-                    {"name": "Skanderbeg Square", "kind": "sight"},
+                    {
+                        "name": "Skanderbeg Square",
+                        "kind": "sight",
+                        "notes": "The beating heart of the city.",
+                    },
                     {"name": "Bunk'Art 2", "kind": "sight"},
                 ],
             }
@@ -259,6 +264,10 @@ async def test_emit_itinerary_streams_per_stop_markers(monkeypatch, fake_db):
     first = _json.loads(stop_frames[0].split("data: ", 1)[1])
     assert first["lat"] == 41.33 and first["lng"] == 19.82
     assert first["day_number"] == 1
+    # Per-stop prose (from `notes`) and the day title ride along the live frame
+    # so the chat row renders in lockstep with the marker.
+    assert first["description"] == "The beating heart of the city."
+    assert first["day_title"] == "Old Town & history"
 
 
 # ---------------------------------------------------------------------------

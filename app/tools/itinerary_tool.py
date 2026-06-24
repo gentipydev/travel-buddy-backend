@@ -23,28 +23,28 @@ ITINERARY_TOOL = {
         "conversational reply in the same response — never call the tool "
         "in silence."
         "\n\n"
-        "CRITICAL — text reply behavior when calling this tool:\n\n"
-        "Calling this tool does NOT replace your natural-language reply. "
-        "Your text response must still contain the FULL itinerary written "
-        "in rich, descriptive prose — every day, every stop, every "
-        "recommendation — exactly as you would write it if this tool did "
-        "not exist. The tool call is a parallel structured payload that "
-        "powers the \"Save itinerary\" button and the persisted trip "
-        "card. The text is the conversational experience the user sees "
-        "while streaming.\n\n"
-        "Do NOT shorten, summarize, or abbreviate your text reply because "
-        "you are also calling the tool. Do NOT write meta-commentary like "
-        "\"I've created an itinerary for you, tap Save to see it.\" The "
-        "user should be able to read the entire plan in the chat without "
-        "saving anything.\n\n"
-        "ORDER — call this tool FIRST, then write the prose. Emit the "
-        "emit_itinerary tool call at the very start of your response "
-        "(before any prose), then write the full warm, descriptive, "
-        "day-by-day, stop-by-stop plan as text. The structured stops are "
-        "streamed onto a live map as you produce them, so they must come "
-        "first. Calling the tool first does NOT let you shorten the prose: "
-        "the text plan that follows must still be complete — every day, "
-        "every stop. Both in the same response."
+        "CRITICAL — where the prose lives (this is a live, streaming UI):\n\n"
+        "The structured stops you emit here are streamed, one at a time, "
+        "onto a live map AND into the chat as a per-stop list, the instant "
+        "each stop is produced. The map marker and the chat row for a stop "
+        "are rendered together from this tool's data. So the descriptive "
+        "prose for each stop must live INSIDE that stop — in its `notes` "
+        "field — not in a separate free-text block.\n\n"
+        "Each stop's `notes` is the warm, vivid, 1–3 sentence description "
+        "the traveler reads in the chat: what the place is, what they can "
+        "do there, why it's worth their time. Write `notes` for EVERY "
+        "stop — this is the conversational experience, not an afterthought. "
+        "Do NOT also repeat the day-by-day plan as a long free-text block "
+        "after the tool call; that would duplicate what the per-stop list "
+        "already shows and break the live sync.\n\n"
+        "ORDER — write a SHORT warm intro line as text FIRST (one sentence, "
+        "e.g. \"Here's your 3 days exploring Albania ✨\"), THEN call "
+        "emit_itinerary with every day and stop, each stop carrying its "
+        "`notes` description. You may add one short closing line of text "
+        "after the tool call (e.g. an invitation to tweak the plan), but "
+        "keep it to a single line — never restate the itinerary. Do NOT "
+        "write meta-commentary like \"I've created an itinerary, tap Save "
+        "to see it.\""
     ),
     "input_schema": {
         "type": "object",
@@ -146,7 +146,22 @@ ITINERARY_TOOL = {
                                             "unclear."
                                         ),
                                     },
-                                    "notes": {"type": "string"},
+                                    "notes": {
+                                        "type": "string",
+                                        "description": (
+                                            "REQUIRED for every stop. The "
+                                            "warm, vivid 1–3 sentence "
+                                            "description shown beside this "
+                                            "stop in the live chat list: "
+                                            "what the place is, what the "
+                                            "traveler can do there, and why "
+                                            "it's worth visiting. This is "
+                                            "the per-stop prose the user "
+                                            "reads while the plan streams — "
+                                            "write it for each stop, not "
+                                            "just logistics."
+                                        ),
+                                    },
                                     "lat": {"type": "number"},
                                     "lng": {"type": "number"},
                                     "google_place_id": {"type": "string"},

@@ -81,6 +81,7 @@ def _flatten_stops(itinerary: dict) -> list[dict]:
         if not isinstance(day, dict):
             continue
         day_number = day.get("day_number")
+        day_title = day.get("title")
         stops = day.get("stops")
         if not isinstance(stops, list):
             continue
@@ -90,10 +91,14 @@ def _flatten_stops(itinerary: dict) -> list[dict]:
             out.append(
                 {
                     "day_number": day_number,
+                    "day_title": day_title,
                     "sort_order": i,
                     "name": stop.get("name"),
                     "kind": stop.get("kind"),
                     "city": stop.get("city"),
+                    # `notes` is the per-stop prose the model writes into the
+                    # tool call; it streams to the live chat row as `description`.
+                    "description": stop.get("notes"),
                     "lat": stop.get("lat"),
                     "lng": stop.get("lng"),
                     "google_place_id": stop.get("google_place_id"),
@@ -122,10 +127,14 @@ async def _stop_marker_frame(stop: dict, index: int) -> str | None:
         "id": f"live-{stop.get('day_number')}-{stop.get('sort_order')}",
         "index": index,
         "day_number": stop.get("day_number"),
+        "day_title": stop.get("day_title"),
         "sort_order": stop.get("sort_order"),
         "name": name,
         "kind": stop.get("kind"),
         "city": stop.get("city"),
+        # Per-stop prose (from the tool's `notes`) — renders as the chat row's
+        # description in lockstep with this marker dropping on the map.
+        "description": stop.get("description"),
         "lat": lat,
         "lng": lng,
         "google_place_id": stop.get("google_place_id") or place_id,
