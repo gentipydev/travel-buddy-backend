@@ -38,7 +38,7 @@ The backend forwards subsets of user data to these processors:
 
 | Vendor | What we send | Purpose | Where |
 |---|---|---|---|
-| **Google Gemini** (Gemini 3.5 Flash) | Chat messages, persona, trip context, retrieved RAG chunks | LLM completions for the Buddy chat | API call from backend; no data retained by us, retained per Google's policy. NOTE: on the Gemini API **free tier**, prompts are used by Google to improve their products — move to a paid (billed) project before serving real user data. |
+| **Google Gemini** (Gemini 2.5 Flash) | Chat messages, persona, trip context, retrieved RAG chunks | LLM completions for the Buddy chat | API call from backend; no data retained by us, retained per Google's policy. NOTE: on the Gemini API **free tier**, prompts are used by Google to improve their products — move to a paid (billed) project before serving real user data. |
 | **Cohere** | Chat-turn user query + candidate chunks | Multilingual reranking of RAG retrieval results | Same — backend-only call |
 | **Google Maps Platform** | Stop name + lat/lng (no user content) | Place Details (photos, ratings), Directions (polylines), Static Maps (thumbnail PNG) | Photos + place data cached in our DB for 90 days |
 | **Supabase** | Everything in §2 above | Auth, Postgres, Storage | Hosted at the Supabase project region |

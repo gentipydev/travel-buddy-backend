@@ -326,7 +326,7 @@ def _build_persona_gate() -> Any:
             "A=YES (system was right) B=NO (system was wrong)."
         ),
         choice_scores={"A": 1.0, "B": 0.0},
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         use_cot=False,
     )
 
@@ -406,7 +406,7 @@ def _build_faithfulness() -> Any:
         name="answer_faithfulness",
         prompt_template=_FAITHFULNESS_TEMPLATE,
         choice_scores={"A": 1.0, "B": 0.0},
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         use_cot=True,
     )
 
@@ -483,7 +483,7 @@ def _build_output_guardrail() -> Any:
         name="output_guardrail",
         prompt_template=template,
         choice_scores={"SAFE": 1.0, "REVIEW": 0.0},
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         use_cot=False,
     )
 

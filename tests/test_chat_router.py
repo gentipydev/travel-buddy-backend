@@ -446,7 +446,7 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
     assert isinstance(trace["stage_latencies"], dict)
     assert "llm_stream" in trace["stage_latencies"]
     assert trace["stage_latencies"]["llm_stream"] > 0
-    # Cost derived from the patched usage at gemini-3.5-flash rates:
+    # Cost derived from the patched usage at gemini-2.5-flash rates:
     #   50 × $0.30/1M + 100 × $2.50/1M + 1500 × $0.075/1M  =  0.0003775
     assert trace["estimated_cost_usd"] == pytest.approx(0.0003775)
 

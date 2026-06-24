@@ -30,18 +30,22 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/travel_buddy"
     allowed_origins: str = "http://localhost:3000"
 
-    # Gemini 3.5 Flash — the chat model. Verified against the live model list
-    # (`models/gemini-3.5-flash`); the API 404s on a bad id, so override
-    # MODEL_CHAT in .env only with an id ListModels reports for your key.
-    model_chat: str = "gemini-3.5-flash"
+    # Gemini 2.5 Flash — the chat model. GA and reliably available (~1-2s/turn).
+    # NOTE: gemini-3.5-flash is the newer tier and is the eventual target, but as
+    # of 2026-06-24 it is severely capacity-constrained (intermittent 503s,
+    # ~50s/turn), so 2.5-flash is the default until that stabilizes. The
+    # client-level retry (app/llm/gemini_client.py) covers transient 503s either
+    # way. Verify any override against `client.models.list()` — the API 404s on a
+    # bad id (e.g. `gemini-3-flash`, no dot).
+    model_chat: str = "gemini-2.5-flash"
     # Auxiliary call sites — the persona YES/NO gate, conversation title
     # generation, and rolling summarization. Held separate so a future
     # model_chat upgrade doesn't silently make these cheap/frequent calls
     # expensive. Defaults match model_chat; override in .env (e.g. a cheaper
     # flash-lite tier) for A/B tests.
-    model_persona_gate: str = "gemini-3.5-flash"
-    model_title_gen: str = "gemini-3.5-flash"
-    model_summarize: str = "gemini-3.5-flash"
+    model_persona_gate: str = "gemini-2.5-flash"
+    model_title_gen: str = "gemini-2.5-flash"
+    model_summarize: str = "gemini-2.5-flash"
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 

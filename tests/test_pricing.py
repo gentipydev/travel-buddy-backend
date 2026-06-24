@@ -9,7 +9,7 @@ import pytest
 
 from app.observability.pricing import compute_cost
 
-_FLASH = "gemini-3.5-flash"
+_FLASH = "gemini-2.5-flash"
 _LITE = "gemini-2.5-flash-lite"
 
 
@@ -40,7 +40,7 @@ def test_flash_cache_tokens_contribute():
 
 
 def test_flash_all_four_categories_sum():
-    # 1M of each category at gemini-3.5-flash rates:
+    # 1M of each category at gemini-2.5-flash rates:
     # 0.30 + 2.50 + 0.30 + 0.075 = 3.175
     cost = compute_cost(
         model=_FLASH,

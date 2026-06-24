@@ -55,7 +55,7 @@ def _new_trace(*, user_id: str | None = None) -> RequestTrace:
         input_tokens=None,
         output_tokens=None,
         latency_ms=0.0,
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         error=None,
     )
 
@@ -523,7 +523,7 @@ async def test_estimated_cost_usd_derived_from_token_usage(
     monkeypatch, fake_db,
 ):
     """compute_cost runs before log_trace and lands on self.trace. At
-    gemini-3.5-flash rates: 100 input × $0.30/1M + 200 output × $2.50/1M
+    gemini-2.5-flash rates: 100 input × $0.30/1M + 200 output × $2.50/1M
     = 0.00053."""
     monkeypatch.setattr(
         chat_agent_module,

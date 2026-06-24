@@ -19,8 +19,23 @@ from app.observability import bt_wrap_genai
 
 # Overall request timeout (milliseconds). The auxiliary calls also wrap their
 # own asyncio.wait_for, but this ceiling keeps a hung connection from pinning
-# a request handler. The SDK retries transient 429/5xx internally.
+# a request handler.
 _TIMEOUT_MS = 60_000
+
+# Transient-error retry. Gemini (especially the newest flash tier) intermittently
+# returns 503 UNAVAILABLE "high demand" at request open — observed in production
+# breaking whole chat turns. These retries fire BEFORE any tokens stream (the
+# 503 surfaces on the open call), so retrying is safe for the streaming path too.
+# ~0.5 + 1 + 2 = ~3.5s worst-case added latency before the first token on a spike,
+# which beats a hard failure. Also covers the 429 rate-limit and 5xx gateway codes.
+_RETRY_OPTIONS = types.HttpRetryOptions(
+    attempts=4,
+    initial_delay=0.5,
+    max_delay=4.0,
+    exp_base=2.0,
+    jitter=0.3,
+    http_status_codes=[429, 500, 502, 503, 504],
+)
 
 # `genai.Client(api_key="")` raises immediately, which would break import in
 # environments without a key (CI, local without secrets). Fall back to a
@@ -34,7 +49,10 @@ _api_key = settings.gemini_api_key or "missing-gemini-api-key"
 client = bt_wrap_genai(
     genai.Client(
         api_key=_api_key,
-        http_options=types.HttpOptions(timeout=_TIMEOUT_MS),
+        http_options=types.HttpOptions(
+            timeout=_TIMEOUT_MS,
+            retry_options=_RETRY_OPTIONS,
+        ),
     )
 )
 

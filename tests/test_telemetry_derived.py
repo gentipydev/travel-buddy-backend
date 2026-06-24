@@ -37,7 +37,7 @@ def _new_trace(**overrides) -> RequestTrace:
         input_tokens=None,
         output_tokens=None,
         latency_ms=0.0,
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         error=None,
     )
     base.update(overrides)
