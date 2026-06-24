@@ -92,7 +92,7 @@ PROMPTS: dict[str, Prompt] = {
     # instructions. They are the largest contributor to cache hit rate;
     # `cache_eligible=True` makes them eligible for the cached prefix in
     # `assemble_chat_system`.
-    "chat.base": _make("chat.base", "2026-05-18", "chat/base.md", cache_eligible=True),
+    "chat.base": _make("chat.base", "2026-06-24", "chat/base.md", cache_eligible=True),
     "chat.inference_addendum": _make(
         "chat.inference_addendum", "2026-05-18", "chat/inference_addendum.md",
         cache_eligible=True,
@@ -104,10 +104,13 @@ PROMPTS: dict[str, Prompt] = {
         notes="Appended when preferences exist; tells Claude to follow conversation over defaults.",
     ),
     "chat.itinerary_tool_addendum": _make(
-        "chat.itinerary_tool_addendum", "2026-05-28", "chat/itinerary_tool_addendum.md",
+        "chat.itinerary_tool_addendum", "2026-06-24", "chat/itinerary_tool_addendum.md",
         cache_eligible=True,
-        notes="The 'write the full plan in prose AND call emit_itinerary' rule. "
-        "2026-05-28: allow single-day itineraries (was multi-day only).",
+        notes="Itinerary delivery rule. 2026-05-28: allow single-day "
+        "itineraries. 2026-06-24: restructured for concise, streaming "
+        "delivery — one intro line of text + structured stops with "
+        "one-sentence `notes`; no full-prose duplicate (was 'write the "
+        "full plan in rich prose AND call emit_itinerary').",
     ),
     # Refine carries the trip JSON which varies every turn — never cache.
     "chat.refine_addendum": _make(
