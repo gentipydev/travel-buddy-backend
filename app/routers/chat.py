@@ -30,11 +30,8 @@ from app.domain.usage_budget import (
     acquire_stream_slot,
     check_global_ceiling,
     check_user_budget,
-    global_over_ceiling,
     release_stream_slot,
-    user_over_budget,
 )
-from app.llm import deepseek_enabled
 from app.observability import (
     RequestTrace,
     new_request_id,
@@ -102,20 +99,8 @@ async def chat_stream(
     # (Cohere embed/rerank, optional Haiku query rewrite). Order after
     # auth (401) and the SlowAPI decorators (429 rate): global ceiling
     # (503) → per-user budget (429) → concurrency slot (429).
-    #
-    # Trigger B (DeepSeek overflow): when a fallback is configured, an
-    # over-budget turn SPILLS to the cheaper DeepSeek model instead of being
-    # hard-blocked — reusing the same limits as the cutover. Global ceiling
-    # takes precedence over the per-user budget as the spill reason. With no
-    # fallback configured, the raising gates preserve today's hard-block.
-    force_fallback_reason: str | None = None
-    if deepseek_enabled():
-        force_fallback_reason = await global_over_ceiling(db) or (
-            await user_over_budget(db, user_id)
-        )
-    else:
-        await check_global_ceiling(db)
-        await check_user_budget(db, user_id)
+    await check_global_ceiling(db)
+    await check_user_budget(db, user_id)
     if not acquire_stream_slot(user_id):
         raise BudgetExceeded(
             detail="concurrent_stream_limit",
@@ -155,7 +140,6 @@ async def chat_stream(
             user_id=user_id,
             trace=trace,
             started_at=started_at,
-            force_fallback_reason=force_fallback_reason,
         )
     except BaseException:
         release_stream_slot(user_id)

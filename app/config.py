@@ -12,21 +12,6 @@ class Settings(BaseSettings):
     gemini_api_key: str
     cohere_api_key: str | None = None
 
-    # DeepSeek — OPTIONAL fallback provider for the chat path (resilience +
-    # cost ceiling). When set, the chat agent spills to `model_fallback` on a
-    # Gemini error before any tokens stream (503/429/the 403 origin-block) and
-    # on a budget-overflow turn instead of hard-blocking. When unset the
-    # fallback is fully disabled and behavior is exactly as Gemini-only today —
-    # deliberately NOT listed in `validate_required_keys()`. OpenAI-compatible
-    # endpoint (`base_url=https://api.deepseek.com`); accessed via the `openai`
-    # SDK. `gemini-3.5-flash` always stays the PRIMARY model — DeepSeek is an
-    # explicit, telemetry-surfaced fallback, never a silent downgrade.
-    deepseek_api_key: str | None = None
-    # `deepseek-v4-flash`: cheap, fast, function-calling, text-only. NOT
-    # `deepseek-v4-pro` — that reasoning tier emits large billed thinking tokens
-    # and can cost MORE per turn than Gemini, defeating the cost goal.
-    model_fallback: str = "deepseek-v4-flash"
-
     # Braintrust observability — LLM trace logging + scorer evals.
     # No-op when `braintrust_api_key` is empty or `braintrust_enabled` is
     # False (the default), so local dev / CI / PRs without the secret run

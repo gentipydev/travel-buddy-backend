@@ -41,11 +41,11 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from app.agents import chat_agent as chat_agent_module
 from app.auth.supabase_auth import get_current_user
 from app.db.engine import get_session
 from app.domain import usage_budget
 from app.domain.chat_pipeline import ChatTurnContext
-from app.llm import gemini_client as gemini_client_module
 from app.main import app
 from app.routers import chat as chat_router_module
 from tests.conftest import FakeSession
@@ -219,11 +219,9 @@ def _patch_prepare_turn(monkeypatch, ctx: ChatTurnContext) -> None:
 
 
 def _patch_client(monkeypatch, text_chunks: list[str], final_message: Any) -> None:
-    """Install a fake Gemini client. The chat agent now streams via
-    `ChatStreamRouter`, which reads `app.llm.gemini_client.client` — so patch
-    that shared object (not the old `chat_agent.client` re-export)."""
+    """Replace `client` in the chat_agent module."""
     monkeypatch.setattr(
-        gemini_client_module, "client", _fake_client(text_chunks, final_message)
+        chat_agent_module, "client", _fake_client(text_chunks, final_message)
     )
 
 
@@ -384,7 +382,7 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
             models=SimpleNamespace(generate_content_stream=_explode),
         ),
     )
-    monkeypatch.setattr(gemini_client_module, "client", fake)
+    monkeypatch.setattr(chat_agent_module, "client", fake)
 
     response = client_authed.post("/chat/stream", json={"message": "hi"})
     frames = parse_sse(response.text)

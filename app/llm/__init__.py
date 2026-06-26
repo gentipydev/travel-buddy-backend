@@ -15,7 +15,6 @@ The `app/agents/` and `app/domain/` layers depend on this package; nothing
 in here depends on either. That keeps the model-API surface in one place.
 """
 from app.llm.caching import assemble_chat_system
-from app.llm.deepseek_client import deepseek_enabled
 from app.llm.gemini_adapter import (
     extract_usage,
     to_gemini_contents,
@@ -27,16 +26,13 @@ from app.llm.gemini_client import (
     client,
     generate_text,
 )
-from app.llm.router import ChatStreamRouter
 from app.llm.streaming import encode_sse_text
 
 __all__ = [
     "GEMINI_ACCESS_DENIED",
-    "ChatStreamRouter",
     "assemble_chat_system",
     "classify_gemini_error",
     "client",
-    "deepseek_enabled",
     "encode_sse_text",
     "extract_usage",
     "generate_text",

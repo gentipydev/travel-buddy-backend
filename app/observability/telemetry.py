@@ -82,18 +82,6 @@ class RequestTrace:
     # turn looks identical to a genuinely-safe one. Dashboards alert on a
     # spike here to catch a silently-degraded guardrail.
     output_guard_failed_open: bool = False
-    # Which provider actually served this turn: "gemini" (primary) or
-    # "deepseek" (fallback). The `model` field above reflects the served
-    # model, so its pricing row is the one `estimated_cost_usd` uses.
-    served_by: str = "gemini"
-    # Why the turn spilled to the fallback, when it did. None on the normal
-    # Gemini path. "gemini_error: ..." for an error fallback (503/429/403),
-    # "budget_user" / "budget_global" for a budget-overflow spill. Lets a
-    # dashboard track the spill rate AND attribute it to a cause.
-    fallback_reason: str | None = None
-    # True when image parts were dropped because the served provider is
-    # text-only (the DeepSeek fallback). The text turn still completed.
-    images_dropped: bool = False
 
     @contextmanager
     def stage(self, name: str):

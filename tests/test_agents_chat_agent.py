@@ -23,7 +23,6 @@ import pytest
 
 from app.agents import chat_agent as chat_agent_module
 from app.agents.chat_agent import ChatAgent
-from app.llm import gemini_client as gemini_client_module
 from app.db.models import Conversation, Trip
 from app.domain.chat_pipeline import ChatTurnContext
 from app.observability import RequestTrace
@@ -150,7 +149,7 @@ async def test_refine_via_emit_itinerary_commits_and_emits_trip_refined(
     }
 
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["here is the plan"],
@@ -220,7 +219,7 @@ async def test_emit_itinerary_streams_per_stop_markers(monkeypatch, fake_db):
         ],
     }
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["A lovely day."],
@@ -285,7 +284,7 @@ async def test_refine_patch_via_apply_refine_tool_commits_once(
     trip = _make_trip()
     latest = _make_trip()
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["ok"],
@@ -331,7 +330,7 @@ async def test_refine_patch_failure_rolls_back_and_emits_refine_failed(
     half-applied) and `event: refine_failed` lands instead of trip_refined."""
     trip = _make_trip()
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["trying..."],
@@ -380,7 +379,7 @@ async def test_persistence_calls_append_then_title_then_summarize(
     maybe_summarize all fire. No persist_failed frame on success."""
     conv = _make_conv()
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["hello there"],
@@ -423,7 +422,7 @@ async def test_persist_failed_event_emitted_before_done(monkeypatch, fake_db):
     on [DONE] and any post-[DONE] yields silently never happen."""
     conv = _make_conv()
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["hi"],
@@ -472,7 +471,7 @@ async def test_llm_stream_stage_recorded_on_success_path(
     """The manual `_llm_start = time.perf_counter()` timer must record a
     value > 0 once the `generate_content_stream(...)` loop finishes."""
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["hi"],
@@ -500,7 +499,7 @@ async def test_persistence_stage_only_records_when_conversation_present(
     block only enters when ctx.conversation is set, so no-conversation turns
     have no `persistence` key in stage_latencies."""
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["hi"],
@@ -527,7 +526,7 @@ async def test_estimated_cost_usd_derived_from_token_usage(
     gemini-2.5-flash rates: 100 input × $0.30/1M + 200 output × $2.50/1M
     = 0.00053."""
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["hi"],
@@ -710,7 +709,7 @@ async def test_midstream_cancellederror_propagates_not_swallowed(
     Here we throw the cancel mid-text-stream and assert it surfaces unchanged
     — no `event: error` frame, no clean completion."""
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["first ", "second ", "third"],
@@ -760,7 +759,7 @@ async def test_disconnect_releases_slot_and_schedules_estimated_usage(
         chat_agent_module, "record_usage_detached", _fake_detached
     )
     monkeypatch.setattr(
-        gemini_client_module,
+        chat_agent_module,
         "client",
         _fake_client(
             text_chunks=["twelve chars", "never sent"],

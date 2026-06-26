@@ -63,14 +63,11 @@ def _seconds_until_utc_midnight() -> int:
     return max(1, 86400 - (now.hour * 3600 + now.minute * 60 + now.second))
 
 
-async def user_over_budget(db: AsyncSession, supabase_uid: str) -> str | None:
-    """Return a reason string when the user's estimated spend today is at/over
-    budget, else None. The non-raising form behind `check_user_budget` — the
-    DeepSeek overflow path (app/routers/chat.py) uses this to SPILL the turn to
-    the cheaper fallback instead of hard-blocking it."""
+async def check_user_budget(db: AsyncSession, supabase_uid: str) -> None:
+    """Raise 429 if the user's estimated spend today is at/over budget."""
     budget = settings.daily_cost_budget_usd_per_user
     if budget <= 0:
-        return None
+        return
     spent = await db.scalar(
         select(UsageDaily.estimated_cost_usd).where(
             UsageDaily.supabase_uid == supabase_uid,
@@ -78,13 +75,6 @@ async def user_over_budget(db: AsyncSession, supabase_uid: str) -> str | None:
         )
     )
     if spent is not None and float(spent) >= budget:
-        return "budget_user"
-    return None
-
-
-async def check_user_budget(db: AsyncSession, supabase_uid: str) -> None:
-    """Raise 429 if the user's estimated spend today is at/over budget."""
-    if await user_over_budget(db, supabase_uid):
         raise BudgetExceeded(
             detail="daily_budget_exceeded",
             status_code=429,
@@ -103,16 +93,12 @@ def _reset_global_cache() -> None:
     _global_cache = None
 
 
-async def global_over_ceiling(db: AsyncSession) -> str | None:
-    """Return a reason string when today's total estimated spend is at/over the
-    ceiling, else None. The non-raising form behind `check_global_ceiling` —
-    the DeepSeek overflow path spills to the fallback instead of 503-blocking.
-    Keeps the same in-process SUM cache so the check stays one query per
-    window."""
+async def check_global_ceiling(db: AsyncSession) -> None:
+    """Raise 503 if today's total estimated spend is at/over the ceiling."""
     global _global_cache
     ceiling = settings.daily_cost_ceiling_usd_global
     if ceiling <= 0:
-        return None
+        return
     now = time.monotonic()
     if (
         _global_cache is None
@@ -125,13 +111,6 @@ async def global_over_ceiling(db: AsyncSession) -> str | None:
         )
         _global_cache = (float(total or 0), now)
     if _global_cache[0] >= ceiling:
-        return "budget_global"
-    return None
-
-
-async def check_global_ceiling(db: AsyncSession) -> None:
-    """Raise 503 if today's total estimated spend is at/over the ceiling."""
-    if await global_over_ceiling(db):
         raise BudgetExceeded(
             detail="service_at_capacity",
             status_code=503,
