@@ -55,8 +55,11 @@ def test_readiness_200_when_db_reachable(monkeypatch):
     # `gemini_backend` is a string label ("developer"/"vertex") for the active
     # LLM surface, so it's excluded from the bool check.
     config = body["checks"]["config"]
-    assert set(config.keys()) == {"gemini", "gemini_backend", "cohere", "google"}
+    assert set(config.keys()) == {
+        "gemini", "gemini_backend", "gemini_vertex_creds", "cohere", "google",
+    }
     assert config["gemini_backend"] in {"developer", "vertex"}
+    assert config["gemini_vertex_creds"] in {"n/a", "adc", "service_account_json"}
     assert all(
         isinstance(config[k], bool) for k in ("gemini", "cohere", "google")
     )

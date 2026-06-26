@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db.engine import get_session
+from app.llm import gemini_client
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,9 @@ async def readiness():
             else settings.gemini_api_key
         ),
         "gemini_backend": "vertex" if settings.gemini_use_vertex else "developer",
+        # Vertex credential source: "service_account_json" (good) vs "adc"
+        # (means GOOGLE_SERVICE_ACCOUNT_JSON didn't load — fails on non-GCP hosts).
+        "gemini_vertex_creds": gemini_client.vertex_creds_source,
         "cohere": bool(settings.cohere_api_key),
         "google": bool(settings.google_api_key),
     }

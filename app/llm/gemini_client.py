@@ -12,12 +12,15 @@ model's plain text out. The streaming chat agent uses `client` directly
 (`client.aio.models.generate_content_stream`).
 """
 import json
+import logging
 
 from google import genai
 from google.genai import types
 
 from app.config import settings
 from app.observability import bt_wrap_genai
+
+logger = logging.getLogger(__name__)
 
 # Overall request timeout (milliseconds). The auxiliary calls also wrap their
 # own asyncio.wait_for, but this ceiling keeps a hung connection from pinning
@@ -45,6 +48,13 @@ _HTTP_OPTIONS = types.HttpOptions(
 )
 
 
+# Where the Vertex credential came from — surfaced on /health/ready so a
+# mangled/empty GOOGLE_SERVICE_ACCOUNT_JSON paste (which silently degrades to
+# ADC, then fails on hosts without ADC) is visible without shipping logs.
+# Set as a side effect of `_vertex_credentials()` at client-build time.
+vertex_creds_source = "n/a"
+
+
 def _vertex_credentials():
     """Service-account credentials for Vertex mode, or None to use ADC.
 
@@ -53,29 +63,45 @@ def _vertex_credentials():
     it. Otherwise return None so the SDK falls back to Application Default
     Credentials (a `GOOGLE_APPLICATION_CREDENTIALS` file path, or the GCP
     metadata server when running on Google infrastructure).
+
+    Records the resolved source in the module-level `vertex_creds_source` and
+    logs a warning when it falls back to ADC, since on a non-GCP host (Render)
+    ADC won't resolve and every call fails — the common cause being a paste that
+    didn't save or got truncated.
     """
+    global vertex_creds_source
     raw = settings.google_service_account_json.strip()
     if not raw:
+        vertex_creds_source = "adc"
+        logger.warning(
+            "vertex: GOOGLE_SERVICE_ACCOUNT_JSON empty — falling back to ADC, "
+            "which will fail on non-GCP hosts (e.g. Render). Set the SA key JSON."
+        )
         return None
     from google.oauth2 import service_account
 
     info = json.loads(raw)
-    return service_account.Credentials.from_service_account_info(
+    creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
+    vertex_creds_source = "service_account_json"
+    return creds
 
 
 def _build_client() -> genai.Client:
     """Construct the singleton, picking the LLM surface from settings.
 
-    Vertex AI (aiplatform.googleapis.com) is the server-side surface — it does
-    NOT edge-block datacenter egress IPs, which is why the Render-hosted backend
-    must use it (the Gemini Developer API HTML-403s Render's IP regardless of
-    billing). Locally, leave `GEMINI_USE_VERTEX=false` so the Developer-API key
-    path keeps working from a residential IP. The call sites are unchanged: the
-    google-genai SDK exposes the same `generate_content` / streaming API and the
-    same `gemini-3.5-flash` model id on both surfaces.
+    Vertex AI (aiplatform.googleapis.com) is the server-side surface and the
+    intended path for hosts whose datacenter IP the Gemini Developer API
+    edge-blocks. NOTE: Google's GFE can still HTML-403 some datacenter egress
+    IPs even on the Vertex endpoint (observed from Render) — that block is at the
+    IP/edge layer, before auth, so switching surfaces alone doesn't cure it;
+    running on GCP compute (Cloud Run/GCE) is the durable fix. Locally, leave
+    `GEMINI_USE_VERTEX=false` so the Developer-API key path works from a
+    residential IP. Call sites are unchanged: the google-genai SDK exposes the
+    same `generate_content` / streaming API and the same `gemini-3.5-flash`
+    model id on both surfaces.
     """
     if settings.gemini_use_vertex:
         return genai.Client(
@@ -127,12 +153,23 @@ def classify_gemini_error(exc: BaseException) -> str:
     is_403 = status == 403 or text.lstrip().startswith("403")
     is_html = "<html" in text.lower() or "Error 403 (Forbidden)" in text
     if is_403 and is_html:
-        return (
-            f"{GEMINI_ACCESS_DENIED}: Gemini returned 403 Forbidden with an "
-            "HTML edge response — the request origin (datacenter/IP) is blocked "
-            "by the Developer API, not a model/key/billing error. Use Vertex AI "
-            "mode (GEMINI_USE_VERTEX=true) from server hosts"
-        )
+        if settings.gemini_use_vertex:
+            # On Vertex a 403 is an IAM/enablement/project problem, NOT an IP
+            # block. The streaming endpoint can surface it as an HTML page, so
+            # keep a tail of the raw body rather than swallowing the cause.
+            hint = (
+                "Vertex AI returned 403 — check the service account's role "
+                "(Vertex AI User), that the Agent Platform/Vertex AI API is "
+                "enabled, and that GOOGLE_CLOUD_PROJECT matches the SA's project"
+            )
+        else:
+            hint = (
+                "the request origin (datacenter IP) is blocked by the Gemini "
+                "Developer API, not a model/key/billing error — use Vertex AI "
+                "mode (GEMINI_USE_VERTEX=true) from server hosts"
+            )
+        detail = " ".join(text.split())[:300]
+        return f"{GEMINI_ACCESS_DENIED}: {hint} | raw: {detail}"
     return text
 
 
