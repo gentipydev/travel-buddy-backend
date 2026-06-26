@@ -52,9 +52,14 @@ def test_readiness_200_when_db_reachable(monkeypatch):
     assert body["checks"]["database"]["ok"] is True
     assert body["checks"]["database"]["error"] is None
     # Config presence is reported (bools), without any external call.
+    # `gemini_backend` is a string label ("developer"/"vertex") for the active
+    # LLM surface, so it's excluded from the bool check.
     config = body["checks"]["config"]
-    assert set(config.keys()) == {"gemini", "cohere", "google"}
-    assert all(isinstance(v, bool) for v in config.values())
+    assert set(config.keys()) == {"gemini", "gemini_backend", "cohere", "google"}
+    assert config["gemini_backend"] in {"developer", "vertex"}
+    assert all(
+        isinstance(config[k], bool) for k in ("gemini", "cohere", "google")
+    )
 
 
 def test_readiness_503_when_db_unreachable(monkeypatch):

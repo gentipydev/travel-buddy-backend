@@ -11,6 +11,8 @@ call sites share: a system instruction + a single user string in, the
 model's plain text out. The streaming chat agent uses `client` directly
 (`client.aio.models.generate_content_stream`).
 """
+import json
+
 from google import genai
 from google.genai import types
 
@@ -37,35 +39,79 @@ _RETRY_OPTIONS = types.HttpRetryOptions(
     http_status_codes=[429, 500, 502, 503, 504],
 )
 
-# `genai.Client(api_key="")` raises immediately, which would break import in
-# environments without a key (CI, local without secrets). Fall back to a
-# placeholder so the module imports; `settings.validate_required_keys()` fails
-# fast at startup when the real key is missing, and tests monkeypatch the
-# client anyway.
-_api_key = settings.gemini_api_key or "missing-gemini-api-key"
-
-# `bt_wrap_genai` is a passthrough today (Braintrust ships no genai wrapper);
-# kept as the single hook point if that changes.
-client = bt_wrap_genai(
-    genai.Client(
-        api_key=_api_key,
-        http_options=types.HttpOptions(
-            timeout=_TIMEOUT_MS,
-            retry_options=_RETRY_OPTIONS,
-        ),
-    )
+_HTTP_OPTIONS = types.HttpOptions(
+    timeout=_TIMEOUT_MS,
+    retry_options=_RETRY_OPTIONS,
 )
 
 
+def _vertex_credentials():
+    """Service-account credentials for Vertex mode, or None to use ADC.
+
+    When `GOOGLE_SERVICE_ACCOUNT_JSON` holds a raw key-file JSON (the simplest
+    setup on Render — paste it as an env var), build explicit credentials from
+    it. Otherwise return None so the SDK falls back to Application Default
+    Credentials (a `GOOGLE_APPLICATION_CREDENTIALS` file path, or the GCP
+    metadata server when running on Google infrastructure).
+    """
+    raw = settings.google_service_account_json.strip()
+    if not raw:
+        return None
+    from google.oauth2 import service_account
+
+    info = json.loads(raw)
+    return service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+
+
+def _build_client() -> genai.Client:
+    """Construct the singleton, picking the LLM surface from settings.
+
+    Vertex AI (aiplatform.googleapis.com) is the server-side surface — it does
+    NOT edge-block datacenter egress IPs, which is why the Render-hosted backend
+    must use it (the Gemini Developer API HTML-403s Render's IP regardless of
+    billing). Locally, leave `GEMINI_USE_VERTEX=false` so the Developer-API key
+    path keeps working from a residential IP. The call sites are unchanged: the
+    google-genai SDK exposes the same `generate_content` / streaming API and the
+    same `gemini-3.5-flash` model id on both surfaces.
+    """
+    if settings.gemini_use_vertex:
+        return genai.Client(
+            vertexai=True,
+            project=settings.google_cloud_project or None,
+            location=settings.google_cloud_location or None,
+            credentials=_vertex_credentials(),
+            http_options=_HTTP_OPTIONS,
+        )
+    # `genai.Client(api_key="")` raises immediately, which would break import in
+    # environments without a key (CI, local without secrets). Fall back to a
+    # placeholder so the module imports; `settings.validate_required_keys()`
+    # fails fast at startup when the real key is missing, and tests monkeypatch
+    # the client anyway.
+    return genai.Client(
+        api_key=settings.gemini_api_key or "missing-gemini-api-key",
+        http_options=_HTTP_OPTIONS,
+    )
+
+
+# `bt_wrap_genai` is a passthrough today (Braintrust ships no genai wrapper);
+# kept as the single hook point if that changes.
+client = bt_wrap_genai(_build_client())
+
+
 # Sentinel prefix for an origin-blocked Gemini call. When the request's source
-# IP/region is refused, Google's edge (GFE) load-shedder responds with a full
-# HTML "Error 403 (Forbidden)" robot page rather than a JSON API error — most
-# often the free tier blocking a datacenter IP/region (observed in production
-# from the Render-hosted backend, while the identical key/model succeeds from a
-# residential IP). `str(exc)` on that is a ~1.5KB HTML blob that buries the
-# signal in telemetry and over the SSE error channel. `classify_gemini_error`
-# collapses the known case to this stable code; everything else passes through
-# unchanged so an unclassified failure is never hidden.
+# IP is refused, Google's edge (GFE) load-shedder responds with a full HTML
+# "Error 403 (Forbidden)" robot page rather than a JSON API error. Confirmed
+# cause on this project: the Gemini *Developer* API edge-blocks the Render
+# backend's datacenter egress IP — the byte-identical key/model succeeds from a
+# residential IP and paid billing does NOT lift it. The fix is Vertex AI mode
+# (`GEMINI_USE_VERTEX=true`), not a key or billing change. `str(exc)` on that
+# 403 is a ~1.5KB HTML blob that buries the signal in telemetry and over the SSE
+# error channel; `classify_gemini_error` collapses the known case to this stable
+# code, and everything else passes through unchanged so an unclassified failure
+# is never hidden.
 GEMINI_ACCESS_DENIED = "gemini_access_denied"
 
 
@@ -83,8 +129,9 @@ def classify_gemini_error(exc: BaseException) -> str:
     if is_403 and is_html:
         return (
             f"{GEMINI_ACCESS_DENIED}: Gemini returned 403 Forbidden with an "
-            "HTML edge response — the request origin is blocked (free-tier "
-            "datacenter-IP/region block or key restriction), not a model error"
+            "HTML edge response — the request origin (datacenter/IP) is blocked "
+            "by the Developer API, not a model/key/billing error. Use Vertex AI "
+            "mode (GEMINI_USE_VERTEX=true) from server hosts"
         )
     return text
 

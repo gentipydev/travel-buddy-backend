@@ -59,7 +59,14 @@ async def readiness():
         logger.warning("readiness: DB check failed: %s", db_error)
 
     config = {
-        "gemini": bool(settings.gemini_api_key),
+        # In Vertex mode the LLM credential is the service account (or ADC), not
+        # the Developer-API key — report readiness against whichever mode is on.
+        "gemini": bool(
+            settings.google_cloud_project
+            if settings.gemini_use_vertex
+            else settings.gemini_api_key
+        ),
+        "gemini_backend": "vertex" if settings.gemini_use_vertex else "developer",
         "cohere": bool(settings.cohere_api_key),
         "google": bool(settings.google_api_key),
     }

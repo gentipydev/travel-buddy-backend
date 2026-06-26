@@ -40,3 +40,23 @@ def test_validate_required_keys_reports_multiple_at_once():
     assert "gemini_api_key" in missing
     assert "supabase_url" in missing
     assert len(missing) == 2
+
+
+def test_vertex_mode_requires_project_not_key():
+    # In Vertex mode the LLM credential is the service account / ADC, so a
+    # missing Developer-API key is fine but a missing project is not.
+    s = Settings(**_settings_kwargs(
+        gemini_api_key="",
+        gemini_use_vertex=True,
+        google_cloud_project="",
+    ))
+    assert s.validate_required_keys() == ["google_cloud_project"]
+
+
+def test_vertex_mode_passes_with_project_and_no_key():
+    s = Settings(**_settings_kwargs(
+        gemini_api_key="",
+        gemini_use_vertex=True,
+        google_cloud_project="my-gcp-project",
+    ))
+    assert s.validate_required_keys() == []

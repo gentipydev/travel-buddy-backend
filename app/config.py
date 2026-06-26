@@ -8,9 +8,30 @@ class Settings(BaseSettings):
     # Google Gemini Developer API key (the LLM provider for chat + all
     # auxiliary calls). DISTINCT from `google_api_key` below, which is the
     # Google Maps Platform key — they are separate credentials on separate
-    # APIs and must not be shared.
-    gemini_api_key: str
+    # APIs and must not be shared. Optional (default "") because Vertex AI
+    # mode (below) authenticates with a service account instead; one of the
+    # two paths is required, enforced in `validate_required_keys`.
+    gemini_api_key: str = ""
     cohere_api_key: str | None = None
+
+    # Vertex AI backend toggle. The Gemini *Developer* API
+    # (generativelanguage.googleapis.com) edge-blocks cloud/datacenter egress
+    # IPs with an HTML 403 regardless of billing — so the Render-hosted backend
+    # cannot reach it (the identical key/model succeeds from a residential IP).
+    # Vertex AI (aiplatform.googleapis.com) is the server-side surface and has
+    # no such block. Flip `GEMINI_USE_VERTEX=true` on the deployed backend;
+    # leave it false locally where the Developer API key works fine.
+    #
+    # Auth in Vertex mode: a service account. Either set
+    # `GOOGLE_SERVICE_ACCOUNT_JSON` to the raw key-file JSON (simplest on
+    # Render — paste it as an env var / secret), or leave it empty to fall back
+    # to Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS path or
+    # the GCP metadata server). `google_cloud_location` is "global" because the
+    # gemini-3.x tier is served from the global endpoint, not a regional one.
+    gemini_use_vertex: bool = False
+    google_cloud_project: str = ""
+    google_cloud_location: str = "global"
+    google_service_account_json: str = ""
 
     # Braintrust observability — LLM trace logging + scorer evals.
     # No-op when `braintrust_api_key` is empty or `braintrust_enabled` is
@@ -132,13 +153,20 @@ class Settings(BaseSettings):
         # missing keys reported at once for a faster ops loop.
         missing = [
             key for key in (
-                "gemini_api_key",
                 "supabase_url",
                 "supabase_anon_key",
                 "supabase_service_key",
                 "database_url",
             ) if not getattr(self, key)
         ]
+        # The LLM credential is one-of: Vertex mode needs a GCP project (auth
+        # comes from the service account / ADC), Developer-API mode needs the
+        # key. Report the one that applies to the active mode.
+        if self.gemini_use_vertex:
+            if not self.google_cloud_project:
+                missing.append("google_cloud_project")
+        elif not self.gemini_api_key:
+            missing.append("gemini_api_key")
         return missing
 
 
