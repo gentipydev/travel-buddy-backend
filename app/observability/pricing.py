@@ -32,6 +32,27 @@ _PRICING: dict[str, dict[str, float]] = {
         "cache_creation": 0.10,
         "cache_read": 0.025,
     },
+    # DeepSeek fallback (OpenAI-compatible). Cheap text-only tier — the whole
+    # point of the spillover. Cache-hit input → `cache_read`; `cache_creation`
+    # mirrors the input rate (no separate cache-write billing), same
+    # convention as the Gemini rows. Refresh from
+    # https://api-docs.deepseek.com/quick_start/pricing.
+    "deepseek-v4-flash": {
+        "input": 0.14,
+        "output": 0.28,
+        "cache_creation": 0.14,
+        "cache_read": 0.0028,
+    },
+    # Reference only — NOT used as a served model. The reasoning tier emits
+    # large billed thinking tokens and can exceed Gemini's per-turn cost,
+    # which is why the fallback uses -flash. Listed so an accidental override
+    # to it still prices instead of returning 0.0.
+    "deepseek-v4-pro": {
+        "input": 0.55,
+        "output": 2.19,
+        "cache_creation": 0.55,
+        "cache_read": 0.14,
+    },
 }
 
 

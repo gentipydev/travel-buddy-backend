@@ -25,7 +25,6 @@ import logging
 import time
 from types import SimpleNamespace
 
-from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -48,12 +47,10 @@ from app.domain.usage_budget import (
     release_stream_slot,
 )
 from app.llm import (
+    ChatStreamRouter,
     assemble_chat_system,
-    client,
+    classify_gemini_error,
     encode_sse_text,
-    extract_usage,
-    to_gemini_contents,
-    to_gemini_tools,
 )
 from app.observability import (
     RequestTrace,
@@ -164,11 +161,16 @@ class ChatAgent:
         user_id: str | None,
         trace: RequestTrace,
         started_at: float,
+        force_fallback_reason: str | None = None,
     ):
         self.db = db
         self.request = request
         self.ctx = ctx
         self.user_id = user_id
+        # Set by the router (trigger B, app/routers/chat.py) when a budget
+        # gate would otherwise hard-block this turn: instead of blocking, the
+        # ChatStreamRouter serves DeepSeek directly. None on the normal path.
+        self.force_fallback_reason = force_fallback_reason
         # The router constructs the trace BEFORE prepare_turn so that
         # `context_assembly` / `rag_*` stages can record into the same
         # `stage_latencies` dict. ctx-derived fields are filled in here
@@ -261,6 +263,10 @@ class ChatAgent:
         # `update_stop` / `insert_stop` / etc. for patch refine. Lands on
         # the Braintrust span so dashboards can filter/group by tool.
         tool_calls_for_span: list[str] = []
+        # The provider router for this turn (Gemini primary / DeepSeek
+        # fallback). Initialized to None so the outer `except` can guard-read
+        # its served-by metadata even if the failure preceded its construction.
+        router: ChatStreamRouter | None = None
         # `chat_span` no-ops to a stand-in span when BRAINTRUST_ENABLED is
         # false — the same `span.log(...)` calls below work unchanged. Token /
         # latency metadata is logged explicitly on the parent span (Braintrust
@@ -319,77 +325,49 @@ class ChatAgent:
                     cached_prefix=ctx.cached_prefix,
                     volatile_suffix=ctx.volatile_suffix,
                 )
-                gemini_tools = to_gemini_tools(available_tools)
-                contents = await to_gemini_contents(ctx.messages)
-                config = types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    # 8192 sits well above what the schema now allows
-                    # (`MAX_STOPS_PER_DAY=3`, so ~12 days × 3 stops + the
-                    # intro/outro paragraph). The headroom is useful — refine
-                    # patch tools are O(edit-size) and don't scale with trip
-                    # size, and a too-low cap can truncate mid-tool-call,
-                    # leaving `emit_itinerary` with a missing `days` field and
-                    # triggering `itinerary_invalid`. We only pay for tokens
-                    # actually generated, so the ceiling is mostly free.
-                    max_output_tokens=8192,
-                    tools=gemini_tools,
-                    # We never let the SDK invoke tools — `emit_itinerary` and
-                    # the refine ops are terminal, rendered client-side — so
-                    # disable automatic function calling and read the
-                    # function_call parts off the stream ourselves.
-                    automatic_function_calling=(
-                        types.AutomaticFunctionCallingConfig(disable=True)
-                    ),
-                )
                 # Manual stage timer (not `with self.trace.stage(...)`) so the
                 # SSE-strict streaming body doesn't need to be re-indented.
                 # Recorded on success after the loop; mid-stream exceptions
                 # fall through to the outer except, capturing the partial
                 # duration there.
                 _llm_start = time.perf_counter()
-                # Gemini streams text deltas progressively but delivers the
-                # function call as a complete block (the Python SDK does not
-                # reliably stream partial tool args). So we accumulate text +
-                # any function_call parts here, then flush every itinerary
-                # stop onto the live map after the stream closes (below) using
-                # the validated payload — the live map populates in one burst
-                # rather than progressively, but the SSE contract is identical.
+                # Provider-neutral streaming: Gemini is primary; the router
+                # spills to DeepSeek on a pre-emit Gemini error (503/429/the
+                # 403 origin-block) or when a budget gate would block this turn
+                # (force_fallback_reason). It yields NORMALIZED events so this
+                # loop is provider-agnostic; which provider served the turn is
+                # read off the router afterward. Tool calls (function_call /
+                # tool_calls) arrive whole, so we accumulate text + tool calls
+                # here and flush every itinerary stop onto the live map after
+                # the stream closes (below) — the SSE contract is identical.
+                router = ChatStreamRouter(
+                    system=system_instruction,
+                    messages=ctx.messages,
+                    tools=available_tools,
+                    force_fallback_reason=self.force_fallback_reason,
+                )
                 _text_parts: list[str] = []
                 function_calls: list[SimpleNamespace] = []
-                finish_reason = None
-                usage_meta = None
-                stream = await client.aio.models.generate_content_stream(
-                    model=settings.model_chat,
-                    contents=contents,
-                    config=config,
-                )
-                async for chunk in stream:
-                    for cand in getattr(chunk, "candidates", None) or []:
-                        fr = getattr(cand, "finish_reason", None)
-                        if fr is not None:
-                            finish_reason = fr
-                        cand_content = getattr(cand, "content", None)
-                        parts = (
-                            getattr(cand_content, "parts", None) or []
-                            if cand_content is not None
-                            else []
-                        )
-                        for part in parts:
-                            txt = getattr(part, "text", None)
-                            if txt:
-                                self._streamed_chars += len(txt)
-                                _text_parts.append(txt)
-                                yield encode_sse_text(txt)
-                            fc = getattr(part, "function_call", None)
-                            if fc is not None:
-                                function_calls.append(
-                                    SimpleNamespace(
-                                        name=fc.name,
-                                        input=dict(fc.args or {}),
-                                    )
-                                )
-                    if getattr(chunk, "usage_metadata", None) is not None:
-                        usage_meta = chunk.usage_metadata
+                usage_tuple: tuple[int, int, int, int] | None = None
+                async for ev in router.stream():
+                    kind = ev[0]
+                    if kind == "text":
+                        txt = ev[1]
+                        self._streamed_chars += len(txt)
+                        _text_parts.append(txt)
+                        yield encode_sse_text(txt)
+                    elif kind == "tool_call":
+                        function_calls.append(ev[1])
+                    elif kind == "usage":
+                        usage_tuple = ev[1]
+                # Record which provider/model actually served the turn BEFORE
+                # any cost/telemetry derivation — `compute_cost` reads
+                # `self.trace.model` below, so this makes cost use the served
+                # model's pricing row and surfaces the spill on the trace.
+                self.trace.model = router.served_model
+                self.trace.served_by = router.served_by
+                self.trace.fallback_reason = router.fallback_reason
+                self.trace.images_dropped = router.images_dropped
                 # Capture usage + dispatch tool calls. Wrapped — token-count
                 # or SDK-shape failures must not crash the request.
                 try:
@@ -398,11 +376,9 @@ class ChatAgent:
                         output_tokens,
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
-                    ) = extract_usage(usage_meta)
+                    ) = usage_tuple or (None, None, None, None)
                     assistant_text = "".join(_text_parts)
-                    stop_reason = (
-                        str(finish_reason) if finish_reason is not None else None
-                    )
+                    stop_reason = router.stop_reason
                     # Validate emit_itinerary tool calls with a Pydantic
                     # validator before emitting `event: itinerary`. The model
                     # is not forced to honor the tool schema, so a missing
@@ -737,6 +713,18 @@ class ChatAgent:
                     },
                 )
             except Exception as e:
+                # Collapse Google's HTML 403 edge-block page (origin/free-tier
+                # block) to a stable code; passes other errors through as-is.
+                error_str = classify_gemini_error(e)
+                # Attribute the served provider/model even on the error path
+                # (e.g. a forced-DeepSeek turn that then failed) so the error
+                # trace's `model` / cost reflect what actually ran. Guarded —
+                # the failure may have preceded the router's construction.
+                if router is not None:
+                    self.trace.model = router.served_model
+                    self.trace.served_by = router.served_by
+                    self.trace.fallback_reason = router.fallback_reason
+                    self.trace.images_dropped = router.images_dropped
                 self.trace.input_tokens = input_tokens
                 self.trace.output_tokens = output_tokens
                 self.trace.cache_creation_input_tokens = cache_creation_input_tokens
@@ -747,7 +735,7 @@ class ChatAgent:
                 self.trace.latency_ms = (
                     time.perf_counter() - self.started_at
                 ) * 1000
-                self.trace.error = str(e)
+                self.trace.error = error_str
                 self.trace.estimated_cost_usd = compute_cost(
                     model=self.trace.model,
                     input_tokens=input_tokens,
@@ -804,7 +792,7 @@ class ChatAgent:
                         "latency_ms": self.trace.latency_ms,
                         "stage_latencies": self.trace.stage_latencies,
                         "estimated_cost_usd": self.trace.estimated_cost_usd,
-                        "error": str(e),
+                        "error": error_str,
                     },
                 )
-                yield f"event: error\ndata: {str(e)}\n\n"
+                yield f"event: error\ndata: {error_str}\n\n"

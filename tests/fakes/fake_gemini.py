@@ -13,9 +13,9 @@
 
 These builders recreate exactly that shape from plain data — no real SDK,
 no network. `fake_genai_client` builds a `client`-shaped object the chat
-agent tests monkeypatch onto `chat_agent.client`; `make_stream` loads a JSON
-cassette and returns the async `generate_content_stream` factory the
-`conftest` fixture installs.
+agent tests monkeypatch onto `app.llm.gemini_client.client` (the object the
+`ChatStreamRouter` reads); `make_stream` loads a JSON cassette and returns
+the async `generate_content_stream` factory the `conftest` fixture installs.
 
 Cassette schema (unchanged from the Anthropic-era recordings, reinterpreted
 for Gemini token accounting):

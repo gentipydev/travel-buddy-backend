@@ -57,6 +57,38 @@ client = bt_wrap_genai(
 )
 
 
+# Sentinel prefix for an origin-blocked Gemini call. When the request's source
+# IP/region is refused, Google's edge (GFE) load-shedder responds with a full
+# HTML "Error 403 (Forbidden)" robot page rather than a JSON API error — most
+# often the free tier blocking a datacenter IP/region (observed in production
+# from the Render-hosted backend, while the identical key/model succeeds from a
+# residential IP). `str(exc)` on that is a ~1.5KB HTML blob that buries the
+# signal in telemetry and over the SSE error channel. `classify_gemini_error`
+# collapses the known case to this stable code; everything else passes through
+# unchanged so an unclassified failure is never hidden.
+GEMINI_ACCESS_DENIED = "gemini_access_denied"
+
+
+def classify_gemini_error(exc: BaseException) -> str:
+    """Map a Gemini call failure to a stable, log-friendly error string.
+
+    Returns `"gemini_access_denied: ..."` for the origin-blocked 403-with-HTML
+    case (see `GEMINI_ACCESS_DENIED`), and the raw `str(exc)` for anything else
+    — so this never swallows or relabels an error it doesn't recognise.
+    """
+    text = str(exc)
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    is_403 = status == 403 or text.lstrip().startswith("403")
+    is_html = "<html" in text.lower() or "Error 403 (Forbidden)" in text
+    if is_403 and is_html:
+        return (
+            f"{GEMINI_ACCESS_DENIED}: Gemini returned 403 Forbidden with an "
+            "HTML edge response — the request origin is blocked (free-tier "
+            "datacenter-IP/region block or key restriction), not a model error"
+        )
+    return text
+
+
 async def generate_text(
     *,
     model: str,

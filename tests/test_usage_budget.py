@@ -15,8 +15,10 @@ from app.domain.usage_budget import (
     acquire_stream_slot,
     check_global_ceiling,
     check_user_budget,
+    global_over_ceiling,
     record_usage,
     release_stream_slot,
+    user_over_budget,
 )
 
 pytestmark = pytest.mark.anyio
@@ -73,6 +75,37 @@ async def test_user_budget_zero_disables_check(monkeypatch, fake_db):
     )
     await check_user_budget(fake_db, "uid-1")
     assert fake_db.executed == []  # disabled → not even a SELECT
+
+
+# ---------------------------------------------------------------------------
+# Non-raising predicates (DeepSeek overflow path / trigger B)
+# ---------------------------------------------------------------------------
+
+
+async def test_user_over_budget_returns_reason_or_none(monkeypatch, fake_db):
+    monkeypatch.setattr(
+        usage_budget.settings, "daily_cost_budget_usd_per_user", 0.50
+    )
+    fake_db.queue(0.50)  # at budget → over
+    assert await user_over_budget(fake_db, "uid-1") == "budget_user"
+    fake_db.queue(0.10)  # under budget → None
+    assert await user_over_budget(fake_db, "uid-1") is None
+
+
+async def test_user_over_budget_zero_disables(monkeypatch, fake_db):
+    monkeypatch.setattr(
+        usage_budget.settings, "daily_cost_budget_usd_per_user", 0.0
+    )
+    assert await user_over_budget(fake_db, "uid-1") is None
+    assert fake_db.executed == []  # disabled → not even a SELECT
+
+
+async def test_global_over_ceiling_returns_reason_or_none(monkeypatch, fake_db):
+    monkeypatch.setattr(
+        usage_budget.settings, "daily_cost_ceiling_usd_global", 1.0
+    )
+    fake_db.queue(2.0)  # over ceiling
+    assert await global_over_ceiling(fake_db) == "budget_global"
 
 
 # ---------------------------------------------------------------------------

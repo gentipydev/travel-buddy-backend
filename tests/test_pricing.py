@@ -87,6 +87,44 @@ def test_unknown_model_returns_zero():
     assert cost == 0.0
 
 
+def test_deepseek_v4_flash_rates():
+    # DeepSeek fallback: 1000 input × $0.14/1M + 2000 output × $0.28/1M
+    # = 0.00014 + 0.00056 = 0.0007
+    cost = compute_cost(
+        model="deepseek-v4-flash",
+        input_tokens=1000,
+        output_tokens=2000,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
+    assert cost == pytest.approx(0.0007)
+
+
+def test_deepseek_v4_flash_cache_read_is_cheap():
+    # Cache-hit input bills at the cheap cache_read rate ($0.0028/1M).
+    cost = compute_cost(
+        model="deepseek-v4-flash",
+        input_tokens=None,
+        output_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=1_000_000,
+    )
+    assert cost == pytest.approx(0.0028)
+
+
+def test_deepseek_flash_cheaper_than_gemini_flash_per_turn():
+    # The whole point of the spill: same tokens cost less on the fallback.
+    tokens = dict(
+        input_tokens=1000,
+        output_tokens=2000,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
+    gemini = compute_cost(model="gemini-3.5-flash", **tokens)
+    deepseek = compute_cost(model="deepseek-v4-flash", **tokens)
+    assert deepseek < gemini
+
+
 def test_all_none_tokens_returns_zero():
     cost = compute_cost(
         model=_FLASH,
