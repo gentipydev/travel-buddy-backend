@@ -185,7 +185,7 @@ def test_trips_invalid_cursor_returns_400(monkeypatch, client, fake_db):
     _patch_trip_serialize(monkeypatch)
     response = client.get("/trips", params={"cursor": "not-a-valid-cursor"})
     assert response.status_code == 400
-    assert "invalid cursor" in response.json()["detail"]
+    assert response.json()["detail"] == "Invalid cursor format"
 
 
 def test_trips_invalid_cursor_uuid_returns_400(monkeypatch, client, fake_db):

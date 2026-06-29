@@ -37,7 +37,9 @@ def _verify(token: str) -> dict:
         # Don't log the token; one warning per rejection is enough to
         # distinguish "real auth failure" from "no token sent".
         logger.warning("auth.token_rejected: %s", e)
-        raise HTTPException(status_code=401, detail=str(e))
+        # The specific reason (bad signature, expired, wrong audience) is in
+        # the server log above; don't hand it to the caller.
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 async def get_current_user(

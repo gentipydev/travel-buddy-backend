@@ -52,8 +52,10 @@ def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
         ts_str, id_str = cursor.split("|", 1)
         return datetime.fromisoformat(ts_str), UUID(id_str)
     except (ValueError, AttributeError) as exc:
+        # Don't echo the parse error back — it's opaque to the client and
+        # exposing it only helps probe the internal cursor format.
         raise HTTPException(
-            status_code=400, detail=f"invalid cursor: {exc}"
+            status_code=400, detail="Invalid cursor format"
         ) from exc
 
 # TODO(tests): pytest scaffolding deferred to a follow-up PR — see
@@ -155,9 +157,11 @@ async def create_trip(
             user_id_for_log,
             len(payload.days),
         )
+        # Detail is already captured in logger.exception above; return a
+        # generic message so we don't leak exception type/internals to clients.
         raise HTTPException(
             status_code=500,
-            detail=f"create_trip failed: {type(exc).__name__}: {exc}",
+            detail="Failed to create trip",
         ) from exc
 
 
