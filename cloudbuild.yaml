@@ -13,7 +13,7 @@ substitutions:
   _SERVICE: travel-buddy-backend
   _RUNTIME_SA: gemini-vertex-422@travel-buddy-500309.iam.gserviceaccount.com
   # CORS origin(s) the web app is served from. Comma-separated.
-  _ALLOWED_ORIGINS: "https://travel-buddy-mobile.onrender.com,http://localhost:3000"
+  _ALLOWED_ORIGINS: "https://travel-buddy-web-2h4g.onrender.com,https://travel-buddy-mobile.onrender.com,http://localhost:3000"
   # Reuse the Artifact Registry repo that `gcloud run deploy --source` created.
   _IMAGE: europe-west2-docker.pkg.dev/travel-buddy-500309/cloud-run-source-deploy/travel-buddy-backend
 

@@ -22,7 +22,7 @@ SERVICE="${SERVICE:-travel-buddy-backend}"
 RUNTIME_SA="${RUNTIME_SA:-gemini-vertex-422@travel-buddy-500309.iam.gserviceaccount.com}"
 
 # CORS origin(s) the web app is served from. Override before deploy.
-ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-https://travel-buddy-mobile.onrender.com,http://localhost:3000}"
+ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-https://travel-buddy-web-2h4g.onrender.com,https://travel-buddy-mobile.onrender.com,http://localhost:3000}"
 
 cd "$(dirname "$0")/.."
 
