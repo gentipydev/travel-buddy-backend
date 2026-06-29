@@ -25,7 +25,7 @@ import logging
 import time
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Mapping, Sequence
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
@@ -243,16 +243,14 @@ def _apply_to_stop(stop: TripStop, result: EnrichmentResult) -> None:
         stop.lng = result.lng
 
 
-async def _create_routes(
-    db: AsyncSession,
-    trip_id: UUID,
+def _route_pairs(
     days: Sequence[TripDay],
-) -> tuple[int, int]:
-    """Schedule one Directions call per consecutive (lat,lng)-bearing stop
-    pair within the same day, plus one per consecutive-day transition
-    (last geo'd stop of day N → first geo'd stop of day N+1). Cross-day
-    routes are owned by the next day and rendered as dashed-grey on the
-    client to read as "transit between days." Returns (attempted, created).
+) -> list[tuple[TripDay, TripStop, TripStop]]:
+    """Consecutive (lat,lng)-bearing stop pairs to route: every adjacent pair
+    within a day, plus each consecutive-day transition (last geo'd stop of
+    day N → first geo'd stop of day N+1). Cross-day pairs are owned by the
+    next day so their trip_day_id matches the day the traveler heads INTO.
+    Shared by the persisted (`_create_routes`) and preview route builders.
     """
     pairs: list[tuple[TripDay, TripStop, TripStop]] = []
     for day in days:
@@ -264,9 +262,6 @@ async def _create_routes(
             ):
                 pairs.append((day, prev, nxt))
 
-    # Cross-day pairs: last geo'd stop of day N → first geo'd stop of day N+1.
-    # Owned by next_day so the route's trip_day_id matches the day the
-    # traveler is heading INTO. Skipped when either side has no coords.
     for prev_day, next_day in zip(days, days[1:]):
         prev_ordered = sorted(prev_day.stops, key=lambda s: s.sort_order)
         next_ordered = sorted(next_day.stops, key=lambda s: s.sort_order)
@@ -287,26 +282,75 @@ async def _create_routes(
         if last is not None and first is not None:
             pairs.append((next_day, last, first))
 
+    return pairs
+
+
+def _route_mode(prev: TripStop, nxt: TripStop) -> str:
+    return (
+        "walking"
+        if haversine_km(prev.lat, prev.lng, nxt.lat, nxt.lng)
+        < _WALKING_THRESHOLD_KM
+        else "driving"
+    )
+
+
+async def _warm_connection(db: AsyncSession) -> None:
+    """Establish the session's DB connection before a Directions fan-out.
+
+    `get_route` calls run via `asyncio.gather` on this one shared session, and
+    AsyncSession forbids concurrent operations — when several legs miss the
+    DirectionsCache at once on a *cold* session, they race connection
+    provisioning and one raises `InvalidRequestError: concurrent operations
+    are not permitted`. Forcing the connection open first serialises that
+    provisioning so the cache reads/writes don't collide. Best-effort: a
+    failure here just falls through to the gather (cache hits still work).
+    """
+    try:
+        await db.connection()
+    except Exception:
+        logger.debug("warm_connection failed", exc_info=True)
+
+
+async def _create_routes(
+    db: AsyncSession,
+    trip_id: UUID,
+    days: Sequence[TripDay],
+) -> tuple[int, int]:
+    """Schedule one Directions call per routable stop pair (see `_route_pairs`)
+    and persist a `TripRoute` per success. Returns (attempted, created).
+    """
+    pairs = _route_pairs(days)
     if not pairs:
         return 0, 0
 
-    tasks = []
-    for _, prev, nxt in pairs:
-        mode = (
-            "walking"
-            if haversine_km(prev.lat, prev.lng, nxt.lat, nxt.lng)
-            < _WALKING_THRESHOLD_KM
-            else "driving"
-        )
-        tasks.append(
-            get_route(db, prev.lat, prev.lng, nxt.lat, nxt.lng, mode)
-        )
+    await _warm_connection(db)
+    tasks = [
+        get_route(db, prev.lat, prev.lng, nxt.lat, nxt.lng, _route_mode(prev, nxt))
+        for _, prev, nxt in pairs
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     created = 0
     for (day, prev, nxt), result in zip(pairs, results):
-        if isinstance(result, Exception) or result is None:
+        # DEBUG(polyline): per-leg outcome so we can see exactly which stop
+        # pairs got a routed polyline vs. fell through to a straight line.
+        if isinstance(result, Exception):
+            logger.warning(
+                "create_routes leg %s -> %s raised=%s",
+                prev.name, nxt.name, type(result).__name__,
+            )
             continue
+        if result is None:
+            logger.info(
+                "create_routes leg %s -> %s result=none (straight line)",
+                prev.name, nxt.name,
+            )
+            continue
+        logger.info(
+            "create_routes leg %s -> %s mode=%s dist_m=%s poly_len=%s",
+            prev.name, nxt.name, result.travel_mode,
+            result.distance_meters, len(result.encoded_polyline),
+        )
         db.add(
             TripRoute(
                 trip_id=trip_id,
@@ -323,6 +367,58 @@ async def _create_routes(
     if created:
         await db.flush()
     return len(pairs), created
+
+
+async def _create_preview_routes(
+    db: AsyncSession,
+    days: Sequence[TripDay],
+) -> list[TripRoute]:
+    """Build road-following routes for the live preview WITHOUT persisting.
+
+    Same pairing + Directions fan-out as `_create_routes`, but returns
+    transient `TripRoute` objects (never `db.add`-ed) so they ride along on
+    the in-memory `trip.routes` for serialization only. The preview trip has
+    no DB row, so persisting these would violate the trip/stop foreign keys.
+    `get_route` still reads/writes the DirectionsCache table (shared, real),
+    so a later Save finds the legs already cached. Best-effort; failures fall
+    back to the client's straight-line connector, same as a saved trip.
+    """
+    pairs = _route_pairs(days)
+    if not pairs:
+        return []
+
+    await _warm_connection(db)
+    tasks = [
+        get_route(db, prev.lat, prev.lng, nxt.lat, nxt.lng, _route_mode(prev, nxt))
+        for _, prev, nxt in pairs
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    routes: list[TripRoute] = []
+    for (day, prev, nxt), result in zip(pairs, results):
+        if isinstance(result, Exception) or result is None:
+            logger.info(
+                "preview_routes leg %s -> %s result=none (straight line)",
+                prev.name, nxt.name,
+            )
+            continue
+        routes.append(
+            TripRoute(
+                id=uuid4(),
+                trip_id=None,
+                trip_day_id=day.id,
+                from_stop_id=prev.id,
+                to_stop_id=nxt.id,
+                encoded_polyline=result.encoded_polyline,
+                distance_meters=result.distance_meters,
+                duration_seconds=result.duration_seconds,
+                travel_mode=result.travel_mode,
+            )
+        )
+    logger.info(
+        "preview_routes attempted=%s created=%s", len(pairs), len(routes)
+    )
+    return routes
 
 
 def _build_static_map(
@@ -375,6 +471,76 @@ async def geocode_stop_preview(
         return None
     place_id, r_lat, r_lng = result
     return r_lat, r_lng, place_id
+
+
+async def build_live_route_dicts(
+    db: AsyncSession,
+    stops: Sequence[Mapping[str, object]],
+) -> list[dict]:
+    """Road-following routes for the per-stop *live-streamed* preview.
+
+    `stops` is the ordered list of stops already pushed to the client as
+    `itinerary_stop` frames — each a mapping with `id` (the `live-{day}-{sort}`
+    id the client keyed its marker on), `day_number`, `lat`, `lng`. Adjacent
+    pairs in this ordered list cover both intra-day legs and day-to-day
+    transitions (last stop of day N → first of day N+1), exactly matching
+    `_route_pairs`. Returns serializable route dicts whose `from_stop_id` /
+    `to_stop_id` match the streamed marker ids, so the client merges them onto
+    the existing live trip with no marker re-animation. No DB writes beyond the
+    shared DirectionsCache; best-effort (failed legs omitted → straight line).
+    """
+    routable = [
+        s for s in stops if s.get("lat") is not None and s.get("lng") is not None
+    ]
+    if len(routable) < 2:
+        return []
+
+    pairs = list(zip(routable, routable[1:]))
+    await _warm_connection(db)
+    tasks = [
+        get_route(
+            db,
+            float(prev["lat"]), float(prev["lng"]),
+            float(nxt["lat"]), float(nxt["lng"]),
+            (
+                "walking"
+                if haversine_km(
+                    float(prev["lat"]), float(prev["lng"]),
+                    float(nxt["lat"]), float(nxt["lng"]),
+                ) < _WALKING_THRESHOLD_KM
+                else "driving"
+            ),
+        )
+        for prev, nxt in pairs
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    routes: list[dict] = []
+    for (prev, nxt), result in zip(pairs, results):
+        if isinstance(result, Exception) or result is None:
+            logger.info(
+                "live_routes leg %s -> %s result=none (straight line)",
+                prev.get("id"), nxt.get("id"),
+            )
+            continue
+        routes.append(
+            {
+                "id": str(uuid4()),
+                # Mirror the client's live day id (appendLiveStop builds
+                # `live-day-{n}`) so the route reads as owned by that day.
+                "trip_day_id": f"live-day-{nxt.get('day_number')}",
+                "from_stop_id": prev["id"],
+                "to_stop_id": nxt["id"],
+                "encoded_polyline": result.encoded_polyline,
+                "distance_meters": result.distance_meters,
+                "duration_seconds": result.duration_seconds,
+                "travel_mode": result.travel_mode,
+            }
+        )
+    logger.info(
+        "live_routes attempted=%s created=%s", len(pairs), len(routes)
+    )
+    return routes
 
 
 async def geocode_itinerary_preview(db: AsyncSession, payload: dict) -> dict:
@@ -458,6 +624,17 @@ async def geocode_itinerary_preview(db: AsyncSession, payload: dict) -> dict:
             await _enrich_places(db, flat_stops)
         except Exception:
             logger.exception("geocode_itinerary_preview phase=places")
+
+    # Route the preview so the live map draws road-following polylines (not
+    # straight connectors) the moment the itinerary streams in. Transient
+    # routes only — nothing persisted; see `_create_preview_routes`. Best-
+    # effort: any failure leaves routes=[] and the client falls back to
+    # straight lines, exactly as before.
+    try:
+        trip.routes = await _create_preview_routes(db, trip.days)
+    except Exception:
+        logger.exception("geocode_itinerary_preview phase=directions")
+        trip.routes = []
 
     # Local import dodges the repository ↔ enrichment cycle (repository
     # already imports this module lazily).

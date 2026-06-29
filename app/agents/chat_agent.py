@@ -37,6 +37,7 @@ from app.domain.conversations import (
 )
 from app.domain.output_guard import check_output_guardrail
 from app.domain.trips.enrichment import (
+    build_live_route_dicts,
     geocode_itinerary_preview,
     geocode_stop_preview,
 )
@@ -113,10 +114,14 @@ def _flatten_stops(itinerary: dict) -> list[dict]:
     return out
 
 
-async def _stop_marker_frame(stop: dict, index: int) -> str | None:
+async def _stop_marker_frame(
+    stop: dict, index: int
+) -> tuple[str, dict] | None:
     """Geocode one streamed stop and render it as an `itinerary_stop` SSE
-    frame for the live map. Returns None when the stop has no name or can't
-    be mapped (the client simply doesn't get a marker for it)."""
+    frame for the live map. Returns `(frame, resolved)` where `resolved`
+    carries the stop id and geocoded coords (so the caller can route the
+    streamed stops after the fact), or None when the stop has no name or
+    can't be mapped (the client simply doesn't get a marker for it)."""
     name = (stop.get("name") or "").strip()
     if not name:
         return None
@@ -129,8 +134,9 @@ async def _stop_marker_frame(stop: dict, index: int) -> str | None:
     if geo is None:
         return None
     lat, lng, place_id = geo
+    stop_id = f"live-{stop.get('day_number')}-{stop.get('sort_order')}"
     payload = {
-        "id": f"live-{stop.get('day_number')}-{stop.get('sort_order')}",
+        "id": stop_id,
         "index": index,
         "day_number": stop.get("day_number"),
         "day_title": stop.get("day_title"),
@@ -145,7 +151,15 @@ async def _stop_marker_frame(stop: dict, index: int) -> str | None:
         "lng": lng,
         "google_place_id": stop.get("google_place_id") or place_id,
     }
-    return f"event: itinerary_stop\ndata: {json.dumps(payload)}\n\n"
+    frame = f"event: itinerary_stop\ndata: {json.dumps(payload)}\n\n"
+    resolved = {
+        "id": stop_id,
+        "day_number": stop.get("day_number"),
+        "sort_order": stop.get("sort_order"),
+        "lat": lat,
+        "lng": lng,
+    }
+    return frame, resolved
 
 
 class ChatAgent:
@@ -486,13 +500,17 @@ class ChatAgent:
                                 # plan. (Gemini delivers the tool call whole, so
                                 # this is where the markers stream.)
                                 final_flat = _flatten_stops(result.payload)
+                                # Resolved (geocoded) stops, in stream order, so
+                                # we can route them once the full plan is known.
+                                live_resolved: list[dict] = []
                                 while preview_emitted < len(final_flat):
                                     s = final_flat[preview_emitted]
                                     preview_emitted += 1
-                                    frame = await _stop_marker_frame(
+                                    marker = await _stop_marker_frame(
                                         s, preview_emitted
                                     )
-                                    if frame:
+                                    if marker:
+                                        frame, resolved = marker
                                         if not preview_started:
                                             preview_started = True
                                             yield (
@@ -500,7 +518,28 @@ class ChatAgent:
                                                 "data: {}\n\n"
                                             )
                                         yield frame
+                                        live_resolved.append(resolved)
                                 yield f"event: itinerary\ndata: {json.dumps(result.payload)}\n\n"
+                                # Road-following routes for the live preview:
+                                # build them keyed by the streamed marker ids and
+                                # ship one `itinerary_routes` frame so the client
+                                # upgrades the straight connectors to real roads
+                                # without re-animating the markers. Best-effort —
+                                # failure leaves the straight lines in place.
+                                if len(live_resolved) >= 2:
+                                    with self.trace.stage("live_routes"):
+                                        try:
+                                            live_routes = await build_live_route_dicts(
+                                                db, live_resolved
+                                            )
+                                        except Exception:
+                                            logger.exception("live_routes failed")
+                                            live_routes = []
+                                    if live_routes:
+                                        yield (
+                                            "event: itinerary_routes\n"
+                                            f"data: {json.dumps({'routes': live_routes})}\n\n"
+                                        )
                                 # Fallback only: if per-stop streaming yielded
                                 # nothing mappable, geocode the whole trip
                                 # after the stream closes (handled below).
