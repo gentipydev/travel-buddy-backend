@@ -23,9 +23,7 @@ import asyncio
 import json
 import logging
 import time
-from types import SimpleNamespace
 
-from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -50,12 +48,10 @@ from app.domain.usage_budget import (
 )
 from app.llm import (
     assemble_chat_system,
-    classify_gemini_error,
+    classify_llm_error,
     client,
     encode_sse_text,
     extract_usage,
-    to_gemini_contents,
-    to_gemini_tools,
 )
 from app.observability import (
     RequestTrace,
@@ -108,14 +104,13 @@ def _flatten_stops(itinerary: dict) -> list[dict]:
                     "description": stop.get("notes"),
                     "lat": stop.get("lat"),
                     "lng": stop.get("lng"),
-                    "google_place_id": stop.get("google_place_id"),
                 }
             )
     return out
 
 
 async def _stop_marker_frame(
-    stop: dict, index: int
+    db: AsyncSession, stop: dict, index: int
 ) -> tuple[str, dict] | None:
     """Geocode one streamed stop and render it as an `itinerary_stop` SSE
     frame for the live map. Returns `(frame, resolved)` where `resolved`
@@ -126,6 +121,7 @@ async def _stop_marker_frame(
     if not name:
         return None
     geo = await geocode_stop_preview(
+        db,
         name=name,
         city=stop.get("city"),
         lat=stop.get("lat"),
@@ -133,7 +129,7 @@ async def _stop_marker_frame(
     )
     if geo is None:
         return None
-    lat, lng, place_id = geo
+    lat, lng = geo
     stop_id = f"live-{stop.get('day_number')}-{stop.get('sort_order')}"
     payload = {
         "id": stop_id,
@@ -149,7 +145,6 @@ async def _stop_marker_frame(
         "description": stop.get("description"),
         "lat": lat,
         "lng": lng,
-        "google_place_id": stop.get("google_place_id") or place_id,
     }
     frame = f"event: itinerary_stop\ndata: {json.dumps(payload)}\n\n"
     resolved = {
@@ -267,10 +262,14 @@ class ChatAgent:
         # Per-stop live-map streaming state (initial-creation path only).
         # `preview_started` gates the one-time stream-start frame the client
         # uses to reset its live trip; `preview_emitted` is how many flattened
-        # stops we've consumed (mapped or skipped) so the end-of-stream flush
-        # knows where to resume.
+        # stops we've consumed (mapped or skipped), the shared cursor between
+        # the live `input_json` loop and the end-of-stream drain so the drain
+        # knows where to resume; `live_resolved` accumulates the geocoded stops
+        # across BOTH in stream order, so the routes can be built once the full
+        # plan is known.
         preview_started: bool = False
         preview_emitted: int = 0
+        live_resolved: list[dict] = []
         # Tool names the model fired this turn — empty for plain chat,
         # `["emit_itinerary"]` for whole-trip create, one or more
         # `update_stop` / `insert_stop` / etc. for patch refine. Lands on
@@ -278,8 +277,8 @@ class ChatAgent:
         tool_calls_for_span: list[str] = []
         # `chat_span` no-ops to a stand-in span when BRAINTRUST_ENABLED is
         # false — the same `span.log(...)` calls below work unchanged. Token /
-        # latency metadata is logged explicitly on the parent span (Braintrust
-        # ships no Gemini auto-tracing wrapper; see `bt_wrap_genai`).
+        # latency metadata is logged explicitly on the parent span; the
+        # per-call child spans come from `bt_wrap_anthropic` on the client.
         with chat_span(name="chat_stream") as span:
             span.log(
                 input=(
@@ -324,20 +323,32 @@ class ChatAgent:
                     if ctx.refine_trip is not None
                     else [ITINERARY_TOOL]
                 )
-                # Gemini takes the system prompt as a single
-                # `config.system_instruction` string (no per-block cache
-                # breakpoints — caching is implicit on 2.5+/3 models). The
-                # stable prefix is joined first so implicit caching can reuse
-                # it across turns; cache accounting comes back on
-                # `chunk.usage_metadata` and is mapped by `extract_usage`.
-                system_instruction = assemble_chat_system(
+                # Prompt caching: the system payload is a 2-block list with
+                # the stable prefix marked as a cache breakpoint and the refine
+                # addendum + RAG context appended as an uncached suffix.
+                # Caching is GA — plain `client.messages.stream(...)`, no beta
+                # header and no special client path. Cache accounting
+                # (`cache_creation_input_tokens` / `cache_read_input_tokens`)
+                # ships back on `final.usage`. NOTE: on claude-haiku-4-5 the
+                # non-refine prefix (4242 measured tokens) sits just under the
+                # cutoff, so plain turns do NOT cache while refine turns
+                # (6704) do — see the measured caveat in `app/llm/caching.py`.
+                system_payload = assemble_chat_system(
                     cached_prefix=ctx.cached_prefix,
                     volatile_suffix=ctx.volatile_suffix,
                 )
-                gemini_tools = to_gemini_tools(available_tools)
-                contents = await to_gemini_contents(ctx.messages)
-                config = types.GenerateContentConfig(
-                    system_instruction=system_instruction,
+                # Manual stage timer (not `with self.trace.stage(...)`) so the
+                # SSE-strict streaming body doesn't need to be re-indented.
+                # Recorded on success after the loop; mid-stream exceptions
+                # fall through to the outer except, capturing the partial
+                # duration there.
+                _llm_start = time.perf_counter()
+                # Messages and tools go over the wire verbatim: `ctx.messages`
+                # is already Anthropic-shaped (text / image-URL content
+                # blocks, and the API fetches image URLs server-side), and the
+                # tool dicts are already `{name, description, input_schema}`.
+                async with client.messages.stream(
+                    model=settings.model_chat,
                     # 8192 sits well above what the schema now allows
                     # (`MAX_STOPS_PER_DAY=3`, so ~12 days × 3 stops + the
                     # intro/outro paragraph). The headroom is useful — refine
@@ -346,65 +357,70 @@ class ChatAgent:
                     # leaving `emit_itinerary` with a missing `days` field and
                     # triggering `itinerary_invalid`. We only pay for tokens
                     # actually generated, so the ceiling is mostly free.
-                    max_output_tokens=8192,
-                    tools=gemini_tools,
-                    # We never let the SDK invoke tools — `emit_itinerary` and
-                    # the refine ops are terminal, rendered client-side — so
-                    # disable automatic function calling and read the
-                    # function_call parts off the stream ourselves.
-                    automatic_function_calling=(
-                        types.AutomaticFunctionCallingConfig(disable=True)
-                    ),
-                )
-                # Manual stage timer (not `with self.trace.stage(...)`) so the
-                # SSE-strict streaming body doesn't need to be re-indented.
-                # Recorded on success after the loop; mid-stream exceptions
-                # fall through to the outer except, capturing the partial
-                # duration there.
-                _llm_start = time.perf_counter()
-                # Gemini streams text deltas progressively but delivers the
-                # function call as a complete block (the Python SDK does not
-                # reliably stream partial tool args). So we accumulate text +
-                # any function_call parts here, then flush every itinerary
-                # stop onto the live map after the stream closes (below) using
-                # the validated payload — the live map populates in one burst
-                # rather than progressively, but the SSE contract is identical.
-                _text_parts: list[str] = []
-                function_calls: list[SimpleNamespace] = []
-                finish_reason = None
-                usage_meta = None
-                stream = await client.aio.models.generate_content_stream(
-                    model=settings.model_chat,
-                    contents=contents,
-                    config=config,
-                )
-                async for chunk in stream:
-                    for cand in getattr(chunk, "candidates", None) or []:
-                        fr = getattr(cand, "finish_reason", None)
-                        if fr is not None:
-                            finish_reason = fr
-                        cand_content = getattr(cand, "content", None)
-                        parts = (
-                            getattr(cand_content, "parts", None) or []
-                            if cand_content is not None
-                            else []
-                        )
-                        for part in parts:
-                            txt = getattr(part, "text", None)
-                            if txt:
-                                self._streamed_chars += len(txt)
-                                _text_parts.append(txt)
-                                yield encode_sse_text(txt)
-                            fc = getattr(part, "function_call", None)
-                            if fc is not None:
-                                function_calls.append(
-                                    SimpleNamespace(
-                                        name=fc.name,
-                                        input=dict(fc.args or {}),
-                                    )
+                    max_tokens=8192,
+                    system=system_payload,
+                    messages=ctx.messages,
+                    tools=available_tools,
+                    # No `thinking` and no `output_config`: haiku-4.5 rejects
+                    # `effort`, and omitting `thinking` means no thinking
+                    # blocks — which is what a time-to-first-token-sensitive
+                    # chat turn wants. We never let the SDK invoke tools
+                    # either; `emit_itinerary` and the refine ops are terminal
+                    # and rendered client-side, and the plain Messages API
+                    # never auto-invokes (no tool runner here).
+                ) as response:
+                    # Iterate the full event stream (not just `text_stream`) so
+                    # we can watch the emit_itinerary tool input accumulate and
+                    # drop each stop onto the live map the moment it's
+                    # complete — long before the model finishes the prose.
+                    # `input_json` events carry `snapshot`, the
+                    # partially-parsed tool input dict (the SDK rebuilds it per
+                    # delta with `jiter.from_json(..., partial_mode=True)`).
+                    async for event in response:
+                        etype = getattr(event, "type", None)
+                        if etype == "text":
+                            self._streamed_chars += len(event.text)
+                            yield encode_sse_text(event.text)
+                        elif etype == "input_json" and ctx.refine_trip is None:
+                            # Live-map streaming, initial-creation path only.
+                            # Non-refine turns are offered ONLY emit_itinerary,
+                            # so any tool input streaming here is that call —
+                            # no per-block name check needed.
+                            snap = event.snapshot
+                            if not isinstance(snap, dict):
+                                continue
+                            # All stops except the last parsed one are safely
+                            # complete (the last may still be streaming). The
+                            # trailing stop(s) are flushed after the final
+                            # message, from the validated payload.
+                            flat = _flatten_stops(snap)
+                            ready = flat[:-1] if len(flat) > 1 else []
+                            while preview_emitted < len(ready):
+                                s_stop = ready[preview_emitted]
+                                preview_emitted += 1
+                                # Geocoding awaits inside the token loop, so a
+                                # slow Mapbox lookup briefly stalls text. That
+                                # is the accepted cost of markers landing in
+                                # lockstep with the prose.
+                                marker = await _stop_marker_frame(
+                                    db, s_stop, preview_emitted
                                 )
-                    if getattr(chunk, "usage_metadata", None) is not None:
-                        usage_meta = chunk.usage_metadata
+                                if marker:
+                                    frame, resolved = marker
+                                    if not preview_started:
+                                        preview_started = True
+                                        yield (
+                                            "event: itinerary_stream_start\n"
+                                            "data: {}\n\n"
+                                        )
+                                    yield frame
+                                    live_resolved.append(resolved)
+                    # Capture the accumulated message while the stream is still
+                    # open. `final` is fully materialized, so every dispatch
+                    # below can safely run after the context manager exits —
+                    # which keeps that ~200-line block at its original
+                    # indentation.
+                    final = await response.get_final_message()
                 # Capture usage + dispatch tool calls. Wrapped — token-count
                 # or SDK-shape failures must not crash the request.
                 try:
@@ -413,11 +429,11 @@ class ChatAgent:
                         output_tokens,
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
-                    ) = extract_usage(usage_meta)
-                    assistant_text = "".join(_text_parts)
-                    stop_reason = (
-                        str(finish_reason) if finish_reason is not None else None
+                    ) = extract_usage(final.usage)
+                    assistant_text = "".join(
+                        b.text for b in final.content if b.type == "text"
                     )
+                    stop_reason = final.stop_reason
                     # Validate emit_itinerary tool calls with a Pydantic
                     # validator before emitting `event: itinerary`. The model
                     # is not forced to honor the tool schema, so a missing
@@ -425,7 +441,9 @@ class ChatAgent:
                     # Flutter parser mid-stream. On validation failure we emit
                     # `event: itinerary_invalid` with a one-line reason; the
                     # natural-language reply already streamed and stays useful.
-                    tool_use_blocks = function_calls
+                    tool_use_blocks = [
+                        b for b in final.content if b.type == "tool_use"
+                    ]
                     tool_calls_for_span = [b.name for b in tool_use_blocks]
                     emit_block = next(
                         (b for b in tool_use_blocks if b.name == "emit_itinerary"),
@@ -495,19 +513,20 @@ class ChatAgent:
                                     )
                             else:
                                 itinerary_emitted = True
-                                # Flush every stop onto the live map using the
+                                # Drain the tail. The live `input_json` loop
+                                # above already streamed every stop that was
+                                # complete mid-generation; this flushes the
+                                # remainder (at minimum the last stop, which the
+                                # loop deliberately held back) from the
                                 # validated payload — the canonical, complete
-                                # plan. (Gemini delivers the tool call whole, so
-                                # this is where the markers stream.)
+                                # plan. `preview_emitted` is the shared cursor
+                                # and `live_resolved` accumulates across both.
                                 final_flat = _flatten_stops(result.payload)
-                                # Resolved (geocoded) stops, in stream order, so
-                                # we can route them once the full plan is known.
-                                live_resolved: list[dict] = []
                                 while preview_emitted < len(final_flat):
                                     s = final_flat[preview_emitted]
                                     preview_emitted += 1
                                     marker = await _stop_marker_frame(
-                                        s, preview_emitted
+                                        db, s, preview_emitted
                                     )
                                     if marker:
                                         frame, resolved = marker
@@ -546,9 +565,9 @@ class ChatAgent:
                                 itinerary_preview_payload = result.payload
                         else:
                             itinerary_validation_error = result.error
-                            # Surface raw input keys + finish_reason on the wire
-                            # so the Flutter client logs can distinguish "model
-                            # truncated mid-tool-call" (finish_reason=MAX_TOKENS,
+                            # Surface raw input keys + stop_reason on the wire
+                            # so the client logs can distinguish "model
+                            # truncated mid-tool-call" (stop_reason=max_tokens,
                             # missing days/stops) from "model emitted a shape we
                             # didn't expect". Cheap diagnostic — always-on.
                             raw_keys = (
@@ -777,9 +796,10 @@ class ChatAgent:
                     },
                 )
             except Exception as e:
-                # Collapse Google's HTML 403 edge-block page (origin/free-tier
-                # block) to a stable code; passes other errors through as-is.
-                error_str = classify_gemini_error(e)
+                # Collapse the named API failure modes (auth / rate limit /
+                # overload / unreachable) to a stable code; passes other errors
+                # through as-is.
+                error_str = classify_llm_error(e)
                 self.trace.input_tokens = input_tokens
                 self.trace.output_tokens = output_tokens
                 self.trace.cache_creation_input_tokens = cache_creation_input_tokens

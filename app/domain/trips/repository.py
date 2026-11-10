@@ -2,9 +2,9 @@
 
 This module owns:
   - `_serialize(trip)` — sync dict rendering of an already-loaded Trip
-  - `serialize_trip(db, trip)` — async chokepoint that enriches (Google
-    Places + Directions + static map URL) then serializes; every mutation
-    path runs through this before returning
+  - `serialize_trip(db, trip)` — async chokepoint that enriches (geocode
+    + Directions + static map URL) then serializes; every mutation path
+    runs through this before returning
   - `_load_trip`, `_load_day`, `_load_stop` — auth-checked loaders with
     `selectinload` + `populate_existing=True` so cached enrichment state
     is fresh
@@ -60,7 +60,6 @@ def _serialize(trip: Trip) -> dict:
                         "notes": stop.notes,
                         "lat": stop.lat,
                         "lng": stop.lng,
-                        "google_place_id": stop.google_place_id,
                         "photo_url": stop.photo_url,
                         "photos": list(stop.photos or []),
                         "rating": stop.rating,

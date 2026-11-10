@@ -339,7 +339,7 @@ async def test_apply_insert_stop_404_when_day_missing(fake_db):
 
 
 async def test_apply_update_stop_patches_set_keys_only(fake_db):
-    """Untouched fields (city, lat, lng, google_place_id) stay as-is —
+    """Untouched fields (city, lat, lng, sort_order) stay as-is —
     the dispatcher passes exclude_unset=True so absent keys are absent."""
     stop = _make_stop(name="Old name", kind="sight")
     stop.city = "Berat"

@@ -2,7 +2,6 @@ import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from google.genai import types
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +14,7 @@ from app.domain.usage_budget import (
     check_user_budget,
     record_usage,
 )
-from app.llm import client, extract_usage
+from app.llm import extract_usage, generate_message, message_text
 from app.observability import compute_cost
 from app.prompts import get as _get_prompt
 from app.rate_limit import limiter, user_or_ip_key
@@ -128,21 +127,19 @@ async def generate_persona(
     prefs.travel_persona = saved_persona
 
     started = time.perf_counter()
-    response = await client.aio.models.generate_content(
+    response = await generate_message(
         model=settings.model_chat,
-        contents=prefs_text,
-        config=types.GenerateContentConfig(
-            system_instruction=PERSONA_SYSTEM_PROMPT,
-            max_output_tokens=512,
-        ),
+        system=PERSONA_SYSTEM_PROMPT,
+        user=prefs_text,
+        max_tokens=512,
     )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
-    new_persona = (response.text or "").strip()
-    in_tok, out_tok, _cache_creation, cache_read = extract_usage(
-        getattr(response, "usage_metadata", None)
+    new_persona = message_text(response).strip()
+    in_tok, out_tok, cache_creation, cache_read = extract_usage(
+        getattr(response, "usage", None)
     )
     logger.info(
-        "gemini.persona_generated",
+        "anthropic.persona_generated",
         extra={
             "model": settings.model_chat,
             "input_tokens": in_tok,
@@ -166,12 +163,13 @@ async def generate_persona(
         str(user.supabase_uid),
         input_tokens=in_tok,
         output_tokens=out_tok,
+        cache_creation_input_tokens=cache_creation,
         cache_read_input_tokens=cache_read,
         estimated_cost_usd=compute_cost(
             model=settings.model_chat,
             input_tokens=in_tok,
             output_tokens=out_tok,
-            cache_creation_input_tokens=0,
+            cache_creation_input_tokens=cache_creation,
             cache_read_input_tokens=cache_read,
         ),
     )

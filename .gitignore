@@ -6,3 +6,11 @@ venv/
 .env.local
 *.egg-info/
 .DS_Store
+
+# Destination gallery originals (downloaded by scripts/upload_destination_photos.py;
+# the record of each photo is scripts/data/destination_photos.json)
+scripts/data/destination_photos/
+
+# Artifact picture originals (downloaded by scripts/upload_artifact_photos.py;
+# the record of each picture is its `photo` block in scripts/data/artifacts.json)
+scripts/data/artifact_photos/

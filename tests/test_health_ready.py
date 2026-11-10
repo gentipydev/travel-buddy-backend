@@ -51,17 +51,14 @@ def test_readiness_200_when_db_reachable(monkeypatch):
     assert body["status"] == "ready"
     assert body["checks"]["database"]["ok"] is True
     assert body["checks"]["database"]["error"] is None
-    # Config presence is reported (bools), without any external call.
-    # `gemini_backend` is a string label ("developer"/"vertex") for the active
-    # LLM surface, so it's excluded from the bool check.
+    # Config presence is reported (bools), without any external call. Every
+    # key is a plain bool — a single Anthropic API key reaches the API from
+    # any host, so there is no credential *mode* to report.
     config = body["checks"]["config"]
-    assert set(config.keys()) == {
-        "gemini", "gemini_backend", "gemini_vertex_creds", "cohere", "google",
-    }
-    assert config["gemini_backend"] in {"developer", "vertex"}
-    assert config["gemini_vertex_creds"] in {"n/a", "adc", "service_account_json"}
+    assert set(config.keys()) == {"anthropic", "cohere", "mapbox"}
     assert all(
-        isinstance(config[k], bool) for k in ("gemini", "cohere", "google")
+        isinstance(config[k], bool)
+        for k in ("anthropic", "cohere", "mapbox")
     )
 
 
@@ -78,7 +75,7 @@ def test_readiness_503_when_db_unreachable(monkeypatch):
 
 def test_readiness_makes_no_paid_external_call(monkeypatch):
     """The probe must check config presence by reading settings, never by
-    pinging Cohere/Anthropic/Google. We assert the DB SELECT 1 is the only
+    pinging Cohere/Anthropic/Mapbox. We assert the DB SELECT 1 is the only
     I/O the handler performs by counting execute() calls."""
     calls = {"n": 0}
 

@@ -5,33 +5,14 @@ from supabase import acreate_client, AsyncClient
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", protected_namespaces=())
 
-    # Google Gemini Developer API key (the LLM provider for chat + all
-    # auxiliary calls). DISTINCT from `google_api_key` below, which is the
-    # Google Maps Platform key — they are separate credentials on separate
-    # APIs and must not be shared. Optional (default "") because Vertex AI
-    # mode (below) authenticates with a service account instead; one of the
-    # two paths is required, enforced in `validate_required_keys`.
-    gemini_api_key: str = ""
+    # Anthropic API key — the LLM provider for chat + all auxiliary calls.
+    # DISTINCT from `mapbox_access_token` below, which is the maps credential;
+    # they are separate credentials on separate APIs and must not be shared.
+    # Get one at https://console.anthropic.com/settings/keys.
+    # Optional (default "") so the module imports without secrets in CI/local;
+    # `validate_required_keys` fails fast at startup when it is missing.
+    anthropic_api_key: str = ""
     cohere_api_key: str | None = None
-
-    # Vertex AI backend toggle. The Gemini *Developer* API
-    # (generativelanguage.googleapis.com) edge-blocks cloud/datacenter egress
-    # IPs with an HTML 403 regardless of billing — so the Render-hosted backend
-    # cannot reach it (the identical key/model succeeds from a residential IP).
-    # Vertex AI (aiplatform.googleapis.com) is the server-side surface and has
-    # no such block. Flip `GEMINI_USE_VERTEX=true` on the deployed backend;
-    # leave it false locally where the Developer API key works fine.
-    #
-    # Auth in Vertex mode: a service account. Either set
-    # `GOOGLE_SERVICE_ACCOUNT_JSON` to the raw key-file JSON (simplest on
-    # Render — paste it as an env var / secret), or leave it empty to fall back
-    # to Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS path or
-    # the GCP metadata server). `google_cloud_location` is "global" because the
-    # gemini-3.x tier is served from the global endpoint, not a regional one.
-    gemini_use_vertex: bool = False
-    google_cloud_project: str = ""
-    google_cloud_location: str = "global"
-    google_service_account_json: str = ""
 
     # Braintrust observability — LLM trace logging + scorer evals.
     # No-op when `braintrust_api_key` is empty or `braintrust_enabled` is
@@ -51,21 +32,23 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/travel_buddy"
     allowed_origins: str = "http://localhost:3000"
 
-    # Gemini 3.5 Flash — the chat model. The newer tier; earlier (2026-06-24) it
-    # was capacity-constrained (intermittent 503s, ~50s/turn) so 2.5-flash was the
-    # temporary default, but we've switched back now that it's the target. The
-    # client-level retry (app/llm/gemini_client.py) covers transient 503s. Verify
-    # any override against `client.models.list()` — the API 404s on a bad id (e.g.
-    # `gemini-3-flash`, no dot).
-    model_chat: str = "gemini-3.5-flash"
+    # Claude Haiku 4.5 — the chat model. 200k context, and the cheapest tier
+    # that still handles the `emit_itinerary` / refine tool schemas reliably.
+    # Use the exact model id with NO date suffix; a dated variant like
+    # `claude-haiku-4-5-20251001` is not the public id. Verify any override
+    # against `client.models.list()` — the API 404s on a bad id.
+    model_chat: str = "claude-haiku-4-5"
     # Auxiliary call sites — the persona YES/NO gate, conversation title
     # generation, and rolling summarization. Held separate so a future
     # model_chat upgrade doesn't silently make these cheap/frequent calls
-    # expensive. Defaults match model_chat; override in .env (e.g. a cheaper
-    # flash-lite tier) for A/B tests.
-    model_persona_gate: str = "gemini-3.5-flash"
-    model_title_gen: str = "gemini-3.5-flash"
-    model_summarize: str = "gemini-3.5-flash"
+    # expensive. Defaults match model_chat; override in .env for A/B tests.
+    #
+    # NOTE: an override must also exist in `app/observability/pricing.py`.
+    # `compute_cost` returns 0.0 for an unknown model id, which would silently
+    # zero out the per-user daily budget AND the global kill switch below.
+    model_persona_gate: str = "claude-haiku-4-5"
+    model_title_gen: str = "claude-haiku-4-5"
+    model_summarize: str = "claude-haiku-4-5"
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 
@@ -101,16 +84,23 @@ class Settings(BaseSettings):
     # precision / added latency.
     query_rewrite_enabled: bool = False
 
-    # Google Maps Platform — Place Details (photos, rating, address) and
-    # Directions (routed polylines) called from services.trip_enrichment.
+    # Mapbox — forward geocoding (coords + address), Directions (routed
+    # polylines) and Static Images (the trip thumbnail), all called from
+    # domain.trips.enrichment. A public `pk.` token is enough; it ends up
+    # embedded in the persisted static-map URL, so restrict it by URL in the
+    # Mapbox account rather than treating it as a secret.
     # Both `_enabled` flags are kill switches for cost control: setting either
-    # to false (or leaving the API key empty) makes the corresponding service
+    # to false (or leaving the token empty) makes the corresponding service
     # short-circuit to None, and trip saves proceed without that data.
     # Curated `places` lookups bypass the kill switch — they're local-only.
-    google_api_key: str = ""
-    google_url_signing_secret: str = ""
-    google_places_enabled: bool = True
-    google_directions_enabled: bool = True
+    mapbox_access_token: str = ""
+    mapbox_geocoding_enabled: bool = True
+    mapbox_directions_enabled: bool = True
+    # Mapbox only licenses *storing* geocoding results under `permanent=true`,
+    # which has to be enabled on the account. We cache results for 90 days and
+    # persist coordinates on trip_stops either way, so this must be turned on
+    # before any real launch.
+    mapbox_permanent_geocoding: bool = False
 
     # LLM cost-abuse guards (app/domain/usage_budget.py). Costs are the
     # same estimated-USD numbers as RequestTrace.estimated_cost_usd
@@ -148,25 +138,18 @@ class Settings(BaseSettings):
     def validate_required_keys(self) -> list[str]:
         # Pydantic already rejects literally-missing required fields, but an
         # empty string passes its `str` check and then fails at first use
-        # (e.g. gemini_api_key="" → 4xx on the first stream). Listing the
+        # (e.g. anthropic_api_key="" → 401 on the first stream). Listing the
         # truthy-required keys here fails fast in `lifespan` instead, with all
         # missing keys reported at once for a faster ops loop.
         missing = [
             key for key in (
+                "anthropic_api_key",
                 "supabase_url",
                 "supabase_anon_key",
                 "supabase_service_key",
                 "database_url",
             ) if not getattr(self, key)
         ]
-        # The LLM credential is one-of: Vertex mode needs a GCP project (auth
-        # comes from the service account / ADC), Developer-API mode needs the
-        # key. Report the one that applies to the active mode.
-        if self.gemini_use_vertex:
-            if not self.google_cloud_project:
-                missing.append("google_cloud_project")
-        elif not self.gemini_api_key:
-            missing.append("gemini_api_key")
         return missing
 
 

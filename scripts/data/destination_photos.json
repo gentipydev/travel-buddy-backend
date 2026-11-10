@@ -1,0 +1,579 @@
+{
+  "berat": [
+    {
+      "file": "berat-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_old_city_of_Berat.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/1/1b/The_old_city_of_Berat.jpg",
+      "author": "Ivan Koev",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Gorica quarter and the Osum river seen from Berat Castle"
+    },
+    {
+      "file": "berat-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Church_of_the_Holy_Trinity,_Berat1.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/8/8b/Church_of_the_Holy_Trinity%2C_Berat1.jpg",
+      "author": "Jocelyn777",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Church of the Holy Trinity inside Berat Castle"
+    },
+    {
+      "file": "berat-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Beratit_-_Berati_04.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/f/f6/Kalaja_e_Beratit_-_Berati_04.jpg",
+      "author": "Shkelzen A. Rexha",
+      "license": "CC0",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/deed.en",
+      "subject": "Stone path up to the Holy Trinity church in the castle"
+    },
+    {
+      "file": "berat-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:2011_Berat,_Most_Gorica_03.JPG",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/6/64/2011_Berat%2C_Most_Gorica_03.JPG",
+      "author": "Marcin Konsek",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Gorica bridge over the Osum river, above old roofs"
+    },
+    {
+      "file": "berat-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Berat,_Mangalem,_Vrahoriti_House_2016-07-04.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/b9/Berat%2C_Mangalem%2C_Vrahoriti_House_2016-07-04.jpg",
+      "author": "Pasztilla aka Attila Terbócs",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Cobbled lane in the Mangalem quarter"
+    },
+    {
+      "file": "berat-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_city_of_1001_Windows_(Berat_,Albania).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/f/f5/The_city_of_1001_Windows_%28Berat_%2CAlbania%29.jpg",
+      "author": "Florian K 21",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Mangalem quarter, the 'thousand windows', over the Osum river"
+    },
+    {
+      "file": "berat-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Berat_-_Xhamia_e_Plumbit_(2018).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/3/39/Berat_-_Xhamia_e_Plumbit_%282018%29.jpg",
+      "author": "Sebleouf",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Lead Mosque (Xhamia e Plumbit)"
+    },
+    {
+      "file": "berat-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Berat_74.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/9/9b/Berat_74.jpg",
+      "author": "Arianit",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Aerial view of Berat Castle and its walls"
+    }
+  ],
+  "butrint": [
+    {
+      "file": "butrint-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Teatri_i_Butrintit.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Teatri_i_Butrintit.jpg",
+      "author": "InaMyrtollari",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Roman theatre"
+    },
+    {
+      "file": "butrint-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Mosaic_of_Butrint_Baptistery.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/b1/Mosaic_of_Butrint_Baptistery.jpg",
+      "author": "Albinfo",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Mosaic floor of the Baptistery"
+    },
+    {
+      "file": "butrint-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Lion_Gate,_with_relief_of_a_lion_devouring_the_head_of_a_bull,_carved_6th_century_BC_but_added_in_the_5th_century_AD_to_lower_the_gate_and_make_it_easier_to_defend,_Butrint,_Albania_(25287116978).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/58/The_Lion_Gate%2C_with_relief_of_a_lion_devouring_the_head_of_a_bull%2C_carved_6th_century_BC_but_added_in_the_5th_century_AD_to_lower_the_gate_and_make_it_easier_to_defend%2C_Butrint%2C_Albania_%2825287116978%29.jpg",
+      "author": "Carole Raddato from FRANKFURT, Germany",
+      "license": "CC BY-SA 2.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/2.0",
+      "subject": "Lion Gate, with its relief of a lion and a bull"
+    },
+    {
+      "file": "butrint-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Parku_Komb%C3%ABtar_i_Butrintit_(cathedral).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/45/Parku_Komb%C3%ABtar_i_Butrintit_%28cathedral%29.jpg",
+      "author": "Ivan Koev",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Great Basilica"
+    },
+    {
+      "file": "butrint-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Ali_Pashes_ne_Butrint.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/4a/Kalaja_e_Ali_Pashes_ne_Butrint.jpg",
+      "author": "Arian Mavriqi",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Aerial view of Ali Pasha's fortress by the Vivari channel"
+    },
+    {
+      "file": "butrint-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Castle_in_Butrint.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/0/0b/Castle_in_Butrint.jpg",
+      "author": "Aryslanbek",
+      "license": "CC0",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/deed.en",
+      "subject": "Venetian tower"
+    },
+    {
+      "file": "butrint-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Venetian_Castle._Tower.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/1/1e/Venetian_Castle._Tower.jpg",
+      "author": "Zysko serhii",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Acropolis castle, now the site museum"
+    },
+    {
+      "file": "butrint-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:2011_Butrint_30.JPG",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/6/64/2011_Butrint_30.JPG",
+      "author": "Marcin Konsek",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Ruins on the shore of Lake Butrint"
+    }
+  ],
+  "gjirokaster": [
+    {
+      "file": "gjirokaster-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Gjirokastr%C3%ABs_16.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/a/a1/Kalaja_e_Gjirokastr%C3%ABs_16.jpg",
+      "author": "ShkelzenRexha",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Castle clock tower with the mountains behind"
+    },
+    {
+      "file": "gjirokaster-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Gjirokast%C3%ABr_%E2%80%93_Zekate_House_01_%E2%80%93_front.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/8/8b/Gjirokast%C3%ABr_%E2%80%93_Zekate_House_01_%E2%80%93_front.jpg",
+      "author": "Malenki",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Zekate House, an Ottoman tower house"
+    },
+    {
+      "file": "gjirokaster-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Gjirokastra_Old_Bazaar_-_Cobblestone_Street_and_Shops.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/43/Gjirokastra_Old_Bazaar_-_Cobblestone_Street_and_Shops.jpg",
+      "author": "Senada Kusi",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Old Bazaar cobbled street"
+    },
+    {
+      "file": "gjirokaster-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Gjirokast%C3%ABr_-_Steinernes_Dach.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Gjirokast%C3%ABr_-_Steinernes_Dach.jpg",
+      "author": "Wolfgang Sauber",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Stone-slate roof with the mountains behind"
+    },
+    {
+      "file": "gjirokaster-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Gjirokastr%C3%ABs,.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/8/87/Kalaja_e_Gjirokastr%C3%ABs%2C.jpg",
+      "author": "Gashi Bujar",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Arched gallery inside Gjirokastër Castle"
+    },
+    {
+      "file": "gjirokaster-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Gjirokastr%C3%ABs_12.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/8/8c/Kalaja_e_Gjirokastr%C3%ABs_12.jpg",
+      "author": "ShkelzenRexha",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Castle clock tower behind hollyhocks"
+    },
+    {
+      "file": "gjirokaster-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Gjirokast%D1%91r_-_roofs.JPG",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/9/9d/Gjirokast%D1%91r_-_roofs.JPG",
+      "author": "Pudelek",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Old-town stone roofs from above"
+    },
+    {
+      "file": "gjirokaster-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Gjirokastr%C3%ABs_10.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/1/19/Kalaja_e_Gjirokastr%C3%ABs_10.jpg",
+      "author": "ShkelzenRexha",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Castle gateway framing the clock tower"
+    }
+  ],
+  "korca": [
+    {
+      "file": "korca-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Katedralja_e_Kor%C3%A7es_03.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/2/25/Katedralja_e_Kor%C3%A7es_03.jpg",
+      "author": "Shkelzen A. Rexha",
+      "license": "CC0",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/deed.en",
+      "subject": "Resurrection Cathedral"
+    },
+    {
+      "file": "korca-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kor%C3%A7%C3%AB_-_Mirahor-Moschee_1c.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/e/ec/Kor%C3%A7%C3%AB_-_Mirahor-Moschee_1c.jpg",
+      "author": "Wolfgang Sauber",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Mirahori (Iljaz Bey) Mosque"
+    },
+    {
+      "file": "korca-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Korca_(53103221389).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/d/df/Korca_%2853103221389%29.jpg",
+      "author": "Marmontel",
+      "license": "CC BY 2.0",
+      "license_url": "https://creativecommons.org/licenses/by/2.0",
+      "subject": "Old Bazaar cobbled street"
+    },
+    {
+      "file": "korca-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kor%C3%A7%C3%AB_-_Altstadthaus_3_Museum.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/c/c8/Kor%C3%A7%C3%AB_-_Altstadthaus_3_Museum.jpg",
+      "author": "Wolfgang Sauber",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Old-town house on a cobbled lane"
+    },
+    {
+      "file": "korca-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kor%C3%A7a_city_center_from_above.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/bc/Kor%C3%A7a_city_center_from_above.jpg",
+      "author": "Leeturtle",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "City centre and boulevard with the mountains behind"
+    },
+    {
+      "file": "korca-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kor%C3%A7%C3%AB_-_Katedralja_ortodokse_Ngjallja_e_Krishtit_(2018).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/e/e3/Kor%C3%A7%C3%AB_-_Katedralja_ortodokse_Ngjallja_e_Krishtit_%282018%29.jpg",
+      "author": "Sebleouf",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Resurrection Cathedral front and steps"
+    },
+    {
+      "file": "korca-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kor%C3%A7%C3%AB_-_Fenster_2.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/44/Kor%C3%A7%C3%AB_-_Fenster_2.jpg",
+      "author": "Wolfgang Sauber",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Old-town window with an ironwork balcony"
+    },
+    {
+      "file": "korca-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Pazari_i_vjeter_i_Korces.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/7/74/Pazari_i_vjeter_i_Korces.jpg",
+      "author": "Sali Jonuzi",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Old Bazaar square in the evening"
+    }
+  ],
+  "kruja": [
+    {
+      "file": "kruja-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Krujes_8.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/6/65/Kalaja_e_Krujes_8.jpg",
+      "author": "AgronBeqiriPh",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Krujë Castle on its mountain spur above the town"
+    },
+    {
+      "file": "kruja-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Skanderbeg_Museum_Kruje_-_Entrance_View.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/be/Skanderbeg_Museum_Kruje_-_Entrance_View.jpg",
+      "author": "Senada Kusi",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Skanderbeg Museum entrance steps"
+    },
+    {
+      "file": "kruja-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Ethnographic_Museum_of_Kruja_1.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/42/Ethnographic_Museum_of_Kruja_1.jpg",
+      "author": "Andisrado",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Ethnographic Museum house"
+    },
+    {
+      "file": "kruja-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Krujes_3.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/e/e4/Kalaja_e_Krujes_3.jpg",
+      "author": "AgronBeqiriPh",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Castle clock tower below Krujë mountain"
+    },
+    {
+      "file": "kruja-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Pamje_nga_Kalaja_e_Krujes.JPG",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/8/8f/Pamje_nga_Kalaja_e_Krujes.JPG",
+      "author": "InaMyrtollari",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "View over the plain from the castle"
+    },
+    {
+      "file": "kruja-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kruja-Bazaar-Albania.JPG",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/a/a9/Kruja-Bazaar-Albania.JPG",
+      "author": "InaMyrtollari",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Old Bazaar cobbled lane with carpets and crafts"
+    },
+    {
+      "file": "kruja-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Masjid_-_Castle_grounds_Kruja,_Albania.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/2/24/Masjid_-_Castle_grounds_Kruja%2C_Albania.jpg",
+      "author": "Klejdi Shtrepi",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Mosque in the castle grounds"
+    },
+    {
+      "file": "kruja-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kalaja_e_Kruj%C3%ABs_-_Kruj%C3%AB_05.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/b/b5/Kalaja_e_Kruj%C3%ABs_-_Kruj%C3%AB_05.jpg",
+      "author": "Shkelzen A. Rexha",
+      "license": "CC0",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/deed.en",
+      "subject": "Old Bazaar roofs, minaret and castle under the mountain"
+    }
+  ],
+  "theth": [
+    {
+      "file": "theth-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kisha_e_Thethit_-_2018_(8).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/7/76/Kisha_e_Thethit_-_2018_%288%29.jpg",
+      "author": "Liridon",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Theth valley with the church and the peaks"
+    },
+    {
+      "file": "theth-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Church_in_Theth.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/59/Church_in_Theth.jpg",
+      "author": "Tom.whitehead337",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Theth church with the peaks behind"
+    },
+    {
+      "file": "theth-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Theth_Waterfall_in_Theth_National_Park.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/f/fc/Theth_Waterfall_in_Theth_National_Park.jpg",
+      "author": "Tom.whitehead337",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Grunas waterfall"
+    },
+    {
+      "file": "theth-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Theth_Valley,_June_2024.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/54/Theth_Valley%2C_June_2024.jpg",
+      "author": "Tom.whitehead337",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Valley trail towards the peaks"
+    },
+    {
+      "file": "theth-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Nderlysaj,_Parku_Komb%C3%ABtar_i_Thethit_02.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/c/c8/Nderlysaj%2C_Parku_Komb%C3%ABtar_i_Thethit_02.jpg",
+      "author": "Liridon",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Nderlysaj pools"
+    },
+    {
+      "file": "theth-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Theth_Blue_Eye.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/d/d4/Theth_Blue_Eye.jpg",
+      "author": "Mariaperrett",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Blue Eye of Theth"
+    },
+    {
+      "file": "theth-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Kulla_e_Ngujimit_Theth.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/c/cc/Kulla_e_Ngujimit_Theth.jpg",
+      "author": "Fabiola Muhollari",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Lock-in Tower (Kulla e Ngujimit)"
+    },
+    {
+      "file": "theth-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:River_flowing_the_Theth_Valley_(Lumi_i_Thethit).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/5f/River_flowing_the_Theth_Valley_%28Lumi_i_Thethit%29.jpg",
+      "author": "Tom.whitehead337",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Theth river below the peaks"
+    }
+  ],
+  "albanian_alps": [
+    {
+      "file": "albanian_alps-1.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:2013-10-05_Valbona,_Albania_8343.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/a/ae/2013-10-05_Valbona%2C_Albania_8343.jpg",
+      "author": "Tobias Klenze",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "subject": "Valbona valley and peaks from above",
+      "credit_line": "Image: Wikipedia / Tobias Klenze / CC-BY-SA 4.0 (the author asks that the licence be a link)"
+    },
+    {
+      "file": "albanian_alps-2.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:2013-10-04_Valbona,_Albania_1359.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/54/2013-10-04_Valbona%2C_Albania_1359.jpg",
+      "author": "Tobias Klenze",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "subject": "Valbona river gorge",
+      "credit_line": "Image: Wikipedia / Tobias Klenze / CC-BY-SA 4.0 (the author asks that the licence be a link)"
+    },
+    {
+      "file": "albanian_alps-3.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:352_SOW_MC-130J_conducts_low-level_flight_training_over_Albania_as_part_of_Trojan_Footprint_21_(6633257).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/d/d9/352_SOW_MC-130J_conducts_low-level_flight_training_over_Albania_as_part_of_Trojan_Footprint_21_%286633257%29.jpg",
+      "author": "U.S. Air Force 352SOW by Staff Sgt. Brandon Nelson",
+      "license": "Public domain",
+      "license_url": "",
+      "subject": "Lake Fierza and the Accursed Mountains from the air"
+    },
+    {
+      "file": "albanian_alps-4.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:2013-10-04_Lake_Koman,_Albania_1023.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/4a/2013-10-04_Lake_Koman%2C_Albania_1023.jpg",
+      "author": "Tobias Klenze",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "subject": "Cliffs of the Lake Koman gorge, from the ferry",
+      "credit_line": "Image: Wikipedia / Tobias Klenze / CC-BY-SA 4.0 (the author asks that the licence be a link)"
+    },
+    {
+      "file": "albanian_alps-5.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:2024-10-14_Valbona_Pass_1.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/2/2e/2024-10-14_Valbona_Pass_1.jpg",
+      "author": "Alexkom000",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0",
+      "subject": "Trail to the Valbona Pass"
+    },
+    {
+      "file": "albanian_alps-6.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Lugina_e_Valbones_9.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/5/55/Lugina_e_Valbones_9.jpg",
+      "author": "BeeGeeS",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0",
+      "subject": "Valbona river with snow-capped peaks"
+    },
+    {
+      "file": "albanian_alps-7.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:05_Musli_Berisha,_miber;_Nje_qati_e_vetmuar_ne_Valbone.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/0/01/05_Musli_Berisha%2C_miber%3B_Nje_qati_e_vetmuar_ne_Valbone.jpg",
+      "author": "Musli Berisha",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Shepherd's hut below the peaks at Rragam"
+    },
+    {
+      "file": "albanian_alps-8.jpg",
+      "source": "wikimedia",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Qafa_e_Rosit.jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/0/06/Qafa_e_Rosit.jpg",
+      "author": "Granit Temaj",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "subject": "Snowfield at Qafa e Rosit, Accursed Mountains"
+    }
+  ]
+}

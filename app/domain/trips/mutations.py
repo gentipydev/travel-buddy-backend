@@ -124,7 +124,6 @@ async def replace_trip_from_payload(
                     notes=stop.get("notes"),
                     lat=stop.get("lat"),
                     lng=stop.get("lng"),
-                    google_place_id=stop.get("google_place_id"),
                 )
             )
         trip.days.append(new_day)
@@ -197,7 +196,6 @@ async def apply_add_day(
                 notes=stop.get("notes"),
                 lat=stop.get("lat"),
                 lng=stop.get("lng"),
-                google_place_id=stop.get("google_place_id"),
             )
         )
     db.add(new_day)
@@ -303,8 +301,8 @@ async def apply_update_stop(
 ) -> Trip:
     """Patch a single stop's fields. `payload` is
     `TripStopUpdate.model_dump(exclude_unset=True)` — only set keys are
-    written, leaving everything else (including google_place_id, lat, lng,
-    sort_order) untouched."""
+    written, leaving everything else (including lat, lng, sort_order)
+    untouched."""
     stop = await _load_stop(db, trip_id, stop_id, user_id)
     if stop is None:
         raise HTTPException(status_code=404, detail="Stop not found")

@@ -1,8 +1,8 @@
-# Travel Buddy — Privacy
+# Pathfinder Albania — Privacy
 
 **Status:** Draft. Placeholders marked `TODO` need values from the operator before public release. Last revised 2026-05-19 as part of docs/07 item 8.
 
-This document describes what Travel Buddy collects, where it lives, who it's shared with, how long it's kept, and how a user can request its deletion. It is not a legal-quality privacy policy; treat it as the technical inventory a lawyer will turn into one.
+This document describes what Pathfinder Albania collects, where it lives, who it's shared with, how long it's kept, and how a user can request its deletion. It is not a legal-quality privacy policy; treat it as the technical inventory a lawyer will turn into one.
 
 ---
 
@@ -38,9 +38,9 @@ The backend forwards subsets of user data to these processors:
 
 | Vendor | What we send | Purpose | Where |
 |---|---|---|---|
-| **Google Gemini** (Gemini 2.5 Flash) | Chat messages, persona, trip context, retrieved RAG chunks | LLM completions for the Buddy chat | API call from backend; no data retained by us, retained per Google's policy. NOTE: on the Gemini API **free tier**, prompts are used by Google to improve their products — move to a paid (billed) project before serving real user data. |
+| **Anthropic** (Claude Haiku 4.5) | Chat messages, persona, trip context, retrieved RAG chunks | LLM completions for the Buddy chat | API call from backend; no data retained by us. Anthropic does not train on API inputs or outputs, and retains them only transiently for trust-and-safety purposes. |
 | **Cohere** | Chat-turn user query + candidate chunks | Multilingual reranking of RAG retrieval results | Same — backend-only call |
-| **Google Maps Platform** | Stop name + lat/lng (no user content) | Place Details (photos, ratings), Directions (polylines), Static Maps (thumbnail PNG) | Photos + place data cached in our DB for 90 days |
+| **Mapbox** | Stop name + city, and lat/lng for routing (no user content) | Forward geocoding (coordinates + formatted address), Directions (polylines), Static Images (thumbnail PNG) | Coordinates + address cached in our DB for 90 days. No photos and no ratings are fetched — those come only from our own curated places table. |
 | **Supabase** | Everything in §2 above | Auth, Postgres, Storage | Hosted at the Supabase project region |
 | **Sentry** | Exception traces post-`_scrub_pii` | Production error visibility | Conditional on `SENTRY_DSN` |
 | **Braintrust** | LLM I/O spans (subject to `LOG_USER_PAYLOADS` flag) | LLM eval + trace dashboards | Conditional on `BRAINTRUST_ENABLED` |

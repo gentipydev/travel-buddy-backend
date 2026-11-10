@@ -79,7 +79,6 @@ class TripStopCreate(BaseModel):
     notes: str | None = None
     lat: float | None = None
     lng: float | None = None
-    google_place_id: str | None = None
 
     @model_validator(mode="after")
     def _coords_in_albania(self):
@@ -126,12 +125,14 @@ class TripCreate(BaseModel):
 class TripStopOut(TripStopCreate):
     id: str
     sort_order: int
-    # Server-side enrichment. None when the stop has no `google_place_id` or
-    # when curated/cache/Google all missed (kill switch off + no curated row).
+    # Server-side enrichment, curated `places` rows only — Mapbox supplies no
+    # photos, so most stops carry None here and the client renders its own
+    # place placeholder.
     photo_url: str | None = None
-    # Ordered list, primary at index 0. Empty for un-enriched / pre-014 rows;
-    # the client falls back to `[photo_url]` in that case.
+    # Ordered list, primary at index 0. Empty for un-enriched / non-curated
+    # stops; the client falls back to `[photo_url]` in that case.
     photos: list[str] = Field(default_factory=list)
+    # Curated rows only, same as `photos`.
     rating: float | None = None
     formatted_address: str | None = None
     # Set when the mobile auto-detector or manual override marks the stop
@@ -161,8 +162,8 @@ class TripOut(BaseModel):
     summary: str | None = None
     start_date: date | None = None
     days: list[TripDayOut]
-    # Signed Google Static Maps URL covering all stops; None when the trip
-    # has no geo'd stops or when both kill switches are off.
+    # Mapbox Static Images URL covering all stops; None when the trip has no
+    # geo'd stops or when no Mapbox token is configured.
     static_map_url: str | None = None
     routes: list[TripRouteOut] = []
     created_at: str
@@ -200,7 +201,6 @@ class TripStopUpdate(BaseModel):
     notes: str | None = None
     lat: float | None = None
     lng: float | None = None
-    google_place_id: str | None = None
     # Mobile sends either a UTC ISO timestamp (mark visited) or null (reset).
     # The mutation dispatcher (apply_update_stop) sets the column directly via
     # setattr; no extra plumbing needed.

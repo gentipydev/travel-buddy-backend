@@ -1,4 +1,4 @@
-"""Travel Buddy chat evaluation primitives.
+"""Pathfinder Albania chat evaluation primitives.
 
 Exports the scorers from `scorers.py` so Braintrust experiment files
 (`evals/runners/`) and inline online-scoring callers can do

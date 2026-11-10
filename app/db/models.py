@@ -101,7 +101,6 @@ class Place(Base):
     __tablename__ = "places"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    google_place_id = Column(String, unique=True, index=True)
     name = Column(String, nullable=False)
     city = Column(String, index=True)
     region = Column(String, index=True)
@@ -297,10 +296,10 @@ class TripStop(Base):
     notes = Column(Text, nullable=True)
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
-    google_place_id = Column(String, nullable=True)
-    # Server-side enrichment from Google Place Details (or curated `places`
-    # row when the place_id matches one we maintain). Backfilled by
-    # services.trip_enrichment after every save / refine.
+    # Server-side enrichment. Only the curated `places` tier supplies photos
+    # and a rating — Mapbox has neither — so most stops carry NULL/[] here and
+    # the client renders its place placeholder. Backfilled by
+    # domain.trips.enrichment after every save / refine.
     photo_url = Column(Text, nullable=True)
     # Ordered photo list, primary at index 0. Mirrors `photo_url` (which
     # stays as the single-photo back-compat fallback for old clients).
@@ -313,32 +312,31 @@ class TripStop(Base):
     day = relationship("TripDay", back_populates="stops")
 
 
-class PlaceCache(Base):
-    """Google Place Details responses, keyed by place_id (90-day TTL).
+class GeocodeCache(Base):
+    """Mapbox forward-search responses, keyed by the normalized query
+    "{name}|{city}" (90-day TTL).
 
-    Miss path for stops whose `google_place_id` is not in the curated
-    `places` table. Curated wins on coverage we control; cache wins on the
-    long tail. See services.google_places.enrich_stop.
+    Miss path for stops whose name is not in the curated `places` table.
+    Curated wins on coverage we control; cache wins on the long tail. See
+    integrations.mapbox_geocoding.resolve_place.
+
+    Carries no rating or photos: Mapbox supplies neither, so those stay
+    curated-only.
     """
-    __tablename__ = "places_cache"
+    __tablename__ = "geocode_cache"
 
-    google_place_id = Column(String, primary_key=True)
+    query_key = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     formatted_address = Column(Text, nullable=True)
     lat = Column(Float, nullable=False)
     lng = Column(Float, nullable=False)
-    rating = Column(Float, nullable=True)
-    user_ratings_total = Column(Integer, nullable=True)
-    primary_photo_url = Column(Text, nullable=True)
-    additional_photo_urls = Column(JSONB, default=list)
-    types = Column(JSONB, default=list)
     raw_response = Column(JSONB, nullable=True)
     fetched_at = Column(DateTime(timezone=True), default=utcnow)
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class DirectionsCache(Base):
-    """Google Directions polylines, keyed by rounded coords + travel mode.
+    """Mapbox Directions polylines, keyed by rounded coords + travel mode.
 
     Two trips that both go from "near Berat castle" to "Berat town center"
     share the cached polyline (4-decimal rounding ≈ 10m precision).

@@ -51,14 +51,14 @@ from app.routers import chat as chat_router_module
 from tests.conftest import FakeSession
 
 # ---------------------------------------------------------------------------
-# Fakes for the Gemini streaming surface.
+# Fakes for the Anthropic streaming surface.
 # ---------------------------------------------------------------------------
-# The chat agent reads `client.aio.models.generate_content_stream(...)` →
-# chunks with `.candidates[].content.parts[].text / .function_call` and a
-# final `.usage_metadata`. The carriers below stay Anthropic-flavored for
-# test ergonomics; `_fake_client` translates them into Gemini chunks via
-# `tests/fakes/fake_gemini`.
-from tests.fakes.fake_gemini import fake_genai_client, usage_metadata
+# The chat agent reads `client.messages.stream(...)` → `text` / `input_json`
+# events, then `get_final_message()` for `.content` / `.usage` /
+# `.stop_reason`. The carriers below build that final message directly — no
+# translation layer, since the app already speaks these shapes.
+from tests.fakes.fake_anthropic import fake_anthropic_client
+from tests.fakes.fake_anthropic import usage as _fake_usage
 
 
 def _text_block(text: str) -> SimpleNamespace:
@@ -73,13 +73,15 @@ def _usage(
     *,
     input_tokens: int = 100,
     output_tokens: int = 200,
-    cache_creation_input_tokens: int = 0,  # accepted but unused — Gemini has none
+    cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
-) -> SimpleNamespace:
-    """Build a Gemini `usage_metadata` object from Anthropic-style counts."""
-    return usage_metadata(
+):
+    """Build a `Message.usage`-shaped object. All four counters are live —
+    Anthropic bills cache writes separately, unlike the previous provider."""
+    return _fake_usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
         cache_read_input_tokens=cache_read_input_tokens,
     )
 
@@ -96,20 +98,10 @@ def _final_message(
 
 
 def _fake_client(text_chunks: list[str], final_message: Any) -> SimpleNamespace:
-    """Build a `client`-shaped namespace whose
-    `client.aio.models.generate_content_stream(...)` streams `text_chunks`
-    then any tool calls + usage carried on `final_message`."""
-    tool_uses = [
-        {"name": b.name, "input": b.input}
-        for b in getattr(final_message, "content", [])
-        if getattr(b, "type", None) == "tool_use"
-    ]
-    return fake_genai_client(
-        text_chunks=text_chunks,
-        tool_uses=tool_uses,
-        usage=final_message.usage,
-        stop_reason=final_message.stop_reason,
-    )
+    """Build a `client`-shaped namespace whose `client.messages.stream(...)`
+    streams `text_chunks` then the tool calls + usage carried on
+    `final_message`."""
+    return fake_anthropic_client(text_chunks, final_message)
 
 
 # ---------------------------------------------------------------------------
@@ -368,20 +360,16 @@ def test_invalid_itinerary_emits_itinerary_invalid(monkeypatch, client_authed):
 
 
 def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
-    """When the Gemini call raises synchronously, the outer try/except
+    """When the Anthropic call raises synchronously, the outer try/except
     yields `event: error\\ndata: <exc message>\\n\\n` and falls through
     without yielding `[DONE]`. The Flutter client treats absence of
     [DONE] + presence of `error` as a request-level failure."""
     _patch_prepare_turn(monkeypatch, _ctx())
 
     def _explode(*_args, **_kwargs):
-        raise RuntimeError("gemini exploded")
+        raise RuntimeError("anthropic exploded")
 
-    fake = SimpleNamespace(
-        aio=SimpleNamespace(
-            models=SimpleNamespace(generate_content_stream=_explode),
-        ),
-    )
+    fake = SimpleNamespace(messages=SimpleNamespace(stream=_explode))
     monkeypatch.setattr(chat_agent_module, "client", fake)
 
     response = client_authed.post("/chat/stream", json={"message": "hi"})
@@ -394,7 +382,7 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
     assert "error" in seq
     assert "[DONE]" not in (data for _, data in frames)
     err_data = next(d for e, d in frames if e == "error")
-    assert "gemini exploded" in err_data
+    assert "anthropic exploded" in err_data
 
 
 # ---------------------------------------------------------------------------
@@ -403,10 +391,11 @@ def test_stream_error_emits_error_event_no_done(monkeypatch, client_authed):
 
 
 def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, caplog):
-    """`cache_read_input_tokens` rides on `usage_metadata` and is emitted on
-    the `RequestTrace` JSON log line — what dashboards key off to compute
-    cache hit rate. Gemini has no separate cache-creation billing, so
-    `cache_creation_input_tokens` is always 0."""
+    """Cache token counters ride on `Message.usage` and are emitted on the
+    `RequestTrace` JSON log line — what dashboards key off to compute cache
+    hit rate. Anthropic bills cache WRITES separately (1.25x input), so
+    `cache_creation_input_tokens` is a live, independently-priced counter and
+    must survive the round trip rather than being flattened to 0."""
     _patch_prepare_turn(monkeypatch, _ctx())
     _patch_client(
         monkeypatch,
@@ -416,6 +405,7 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
             usage=_usage(
                 input_tokens=50,
                 output_tokens=100,
+                cache_creation_input_tokens=200,
                 cache_read_input_tokens=1500,
             ),
         ),
@@ -431,7 +421,7 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
     assert trace_records, "expected a RequestTrace JSON log record"
 
     trace = json.loads(trace_records[-1].getMessage())
-    assert trace["cache_creation_input_tokens"] == 0
+    assert trace["cache_creation_input_tokens"] == 200
     assert trace["cache_read_input_tokens"] == 1500
     assert trace["input_tokens"] == 50
     assert trace["output_tokens"] == 100
@@ -444,9 +434,10 @@ def test_cache_tokens_recorded_on_request_trace(monkeypatch, client_authed, capl
     assert isinstance(trace["stage_latencies"], dict)
     assert "llm_stream" in trace["stage_latencies"]
     assert trace["stage_latencies"]["llm_stream"] > 0
-    # Cost derived from the patched usage at gemini-2.5-flash rates:
-    #   50 × $0.30/1M + 100 × $2.50/1M + 1500 × $0.075/1M  =  0.0003775
-    assert trace["estimated_cost_usd"] == pytest.approx(0.0003775)
+    # Cost derived from the patched usage at claude-haiku-4-5 rates:
+    #   50 × $1.00/1M + 100 × $5.00/1M
+    #   + 200 × $1.25/1M + 1500 × $0.10/1M  =  0.00095
+    assert trace["estimated_cost_usd"] == pytest.approx(0.00095)
 
 
 def test_itinerary_emitted_flag_set_on_trace(monkeypatch, client_authed, caplog):

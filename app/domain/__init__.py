@@ -2,7 +2,7 @@
 
 Two sub-domains today:
   - `app.domain.trips` — trip CRUD (load/serialize), mutations (apply_*),
-    enrichment (Google Places + Directions + static map), and the geo
+    enrichment (geocoding + Directions + static map), and the geo
     helpers (Albania bounding-box + haversine).
   - `app.domain.conversations` — conversation persistence (get_or_create,
     append_messages, build_history), rolling summarization + title

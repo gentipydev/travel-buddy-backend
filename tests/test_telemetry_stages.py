@@ -29,7 +29,7 @@ def _new_trace() -> RequestTrace:
         input_tokens=None,
         output_tokens=None,
         latency_ms=0.0,
-        model="claude-haiku-4-5-20251001",
+        model="claude-haiku-4-5",
         error=None,
     )
 

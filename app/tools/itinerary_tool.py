@@ -163,7 +163,6 @@ ITINERARY_TOOL = {
                                     },
                                     "lat": {"type": "number"},
                                     "lng": {"type": "number"},
-                                    "google_place_id": {"type": "string"},
                                 },
                             },
                         },

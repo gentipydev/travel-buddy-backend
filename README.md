@@ -1,9 +1,9 @@
-# Travel Buddy — Backend
+# Pathfinder Albania — Backend
 
-FastAPI + async SQLAlchemy + Google Gemini + Cohere + Supabase. The
+FastAPI + async SQLAlchemy + Anthropic Claude + Cohere + Supabase. The
 backend for an Albania-first AI travel assistant: streaming chat with
 tool use, surgical trip refinement, RAG over curated Albanian content,
-and post-save enrichment via Google Maps. Powers a Flutter mobile app.
+and post-save enrichment via Mapbox. Powers a Flutter mobile app.
 
 ## Architecture
 
@@ -13,9 +13,9 @@ app/
 ├── agents/          Multi-step LLM orchestration (streaming chat agent)
 ├── prompts/         Versioned prompt registry + .md prompt bodies
 ├── tools/           tool-use schemas + validators + refine dispatcher
-├── llm/             Gemini client + adapters, system-prompt helpers, SSE encoding
+├── llm/             Anthropic client, prompt-caching helpers, SSE encoding
 ├── rag/             Cohere embed + rerank + adaptive retrieval routing
-├── integrations/    Google Maps (Places + Directions + Static Maps),
+├── integrations/    Mapbox (geocoding + Directions + Static Images),
 │                    Cohere client, Supabase Storage
 ├── domain/          Business logic — trips + conversations + chat pipeline
 ├── observability/   JSON logging + per-request telemetry traces
@@ -58,9 +58,9 @@ Each pattern links to working code:
 ```bash
 # 1. Configure
 cp .env.example .env
-# Fill in GEMINI_API_KEY, COHERE_API_KEY, SUPABASE_URL,
+# Fill in ANTHROPIC_API_KEY, COHERE_API_KEY, SUPABASE_URL,
 # SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY, DATABASE_URL,
-# GOOGLE_API_KEY, GOOGLE_URL_SIGNING_SECRET.
+# MAPBOX_ACCESS_TOKEN.
 # Every variable lives in `.env.example` with an inline comment.
 
 # 2. Install
@@ -74,6 +74,7 @@ ls supabase/migrations/*.sql       # 14 migrations, run in order
 python -m scripts.seed_places
 python -m scripts.chunk_places
 python -m scripts.embed_chunks    # needs COHERE_API_KEY
+python -m scripts.upload_artifact_photos   # artifact pictures; run before seeding them
 python -m scripts.seed_artifacts
 python -m scripts.setup_storage   # idempotent bucket creation
 
@@ -90,7 +91,7 @@ pytest -q       # 64 service-layer tests, ~0.5s
 
 Coverage today: pure functions (geo bbox, static map URL, Pydantic
 schemas, itinerary validator) + service-level integration tests for the
-Google enrichment paths (mocked HTTP via `httpx.MockTransport`). Router
+Mapbox enrichment paths (mocked HTTP via `httpx.MockTransport`). Router
 endpoints + LLM behavior are **not** covered — see
 [`evals/`](evals/) for the planned eval framework, and the **Smoke
 test** section below for the manual procedure.
@@ -130,8 +131,8 @@ lands before `[DONE]`.
 - **Cache hit rate.** Compute as
   `cache_read_input_tokens / (cache_read_input_tokens +
   cache_creation_input_tokens + input_tokens)`.
-- **Kill switches.** `GOOGLE_PLACES_ENABLED=false` and
-  `GOOGLE_DIRECTIONS_ENABLED=false` short-circuit the corresponding
+- **Kill switches.** `MAPBOX_GEOCODING_ENABLED=false` and
+  `MAPBOX_DIRECTIONS_ENABLED=false` short-circuit the corresponding
   enrichment paths. Trips save without that data; the client falls
   back to straight-line polylines.
 - **Model overrides.** `MODEL_CHAT`, `MODEL_PERSONA_GATE`,
@@ -140,10 +141,29 @@ lands before `[DONE]`.
 
 ## Deployment
 
-Container in `Dockerfile`, hosted on Render. The Postgres connection
-points at the Supabase transaction pooler (port 6543) — see
-[`app/db/engine.py`](app/db/engine.py) for the pgbouncer-aware
-tuning.
+No hosting platform is committed to. Two supported ways to run it:
+
+```bash
+# Local — the current development setup.
+uvicorn app.main:app --reload --port 8000
+# Bind 0.0.0.0 instead of the default loopback to reach it from a phone
+# on the same Wi-Fi; the Android emulator uses http://10.0.2.2:8000.
+
+# Container — works on any host that runs a Docker image.
+docker compose up --build          # or: docker build -t travel-buddy-api .
+```
+
+The image reads `$PORT` (default 8000) and already passes
+`--proxy-headers`, so it drops into a managed container host unchanged.
+
+Every setting comes from the environment — see `.env.example` for the full
+list. **`ALLOWED_ORIGINS` deserves special mention:** it used to be injected
+by the deploy pipeline rather than read from `.env`, so when you move to a
+new host it must be set there explicitly or browser clients will fail CORS.
+
+The Postgres connection points at the Supabase transaction pooler
+(port 6543) — see [`app/db/engine.py`](app/db/engine.py) for the
+pgbouncer-aware tuning.
 
 ## Repository layout
 

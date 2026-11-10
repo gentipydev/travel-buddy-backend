@@ -44,5 +44,4 @@ def to_card_dict(place: Place) -> dict:
         "rating": place.rating,
         "lat": place.latitude,
         "lng": place.longitude,
-        "google_place_id": place.google_place_id,
     }

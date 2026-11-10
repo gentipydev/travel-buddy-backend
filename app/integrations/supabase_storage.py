@@ -22,38 +22,51 @@ async def upload_place_photo(
     return await supabase.storage.from_(PLACE_PHOTOS_BUCKET).get_public_url(file_path)
 
 
-async def list_bucket_folder(bucket: str, prefix: str) -> list[str]:
-    """Public URLs for every image file directly under `prefix` in `bucket`.
+# Small copies of gallery and artifact photos live in a `thumbs/` subfolder
+# next to the full-size file (written by the upload scripts).
+THUMBS_FOLDER = "thumbs"
 
-    Subfolder/prefix entries in Supabase Storage's listing have a `name`
-    but no `id` (only file objects get a UUID), so we filter on `id`.
-    Also drops `.emptyFolderPlaceholder` (the 0-byte sentinel Supabase
-    Studio writes when you create a folder via the dashboard) and any
-    other non-image objects by checking the stored mimetype.
-    Sorted by filename for a stable order without persisting ordering
-    metadata.
+
+def thumb_path(path: str) -> str:
+    """`a/b/name.jpg` -> `a/b/thumbs/name.jpg`."""
+    folder, _, name = path.rpartition("/")
+    return f"{folder}/{THUMBS_FOLDER}/{name}" if folder else f"{THUMBS_FOLDER}/{name}"
+
+
+def is_image_file(entry: dict) -> bool:
+    """True for an image object in a Storage listing.
+
+    Subfolder entries have a `name` but no `id` (only file objects get a
+    UUID). Also drops `.emptyFolderPlaceholder` (the 0-byte sentinel
+    Supabase Studio writes when you create a folder via the dashboard) and
+    any other non-image objects by checking the stored mimetype.
     """
+    return bool(entry.get("id")) and (entry.get("metadata") or {}).get(
+        "mimetype", ""
+    ).startswith("image/")
+
+
+async def list_image_names(bucket: str, prefix: str) -> list[str]:
+    """Names of the image files directly under `prefix`, sorted."""
     supabase = await get_supabase()
     files = await supabase.storage.from_(bucket).list(path=prefix)
-    names = sorted(
-        f["name"]
-        for f in files
-        if f.get("id")
-        and (f.get("metadata") or {}).get("mimetype", "").startswith("image/")
-    )
-    return [
-        await supabase.storage.from_(bucket).get_public_url(f"{prefix}/{name}")
-        for name in names
-    ]
+    return sorted(f["name"] for f in files if is_image_file(f))
+
+
+async def public_url(bucket: str, path: str) -> str:
+    supabase = await get_supabase()
+    return await supabase.storage.from_(bucket).get_public_url(path)
+
+
+async def list_bucket_folder(bucket: str, prefix: str) -> list[str]:
+    """Public URLs for every image file directly under `prefix` in `bucket`,
+    sorted by filename for a stable order without persisting ordering
+    metadata."""
+    return [await public_url(bucket, f"{prefix}/{name}") for name in await list_image_names(bucket, prefix)]
 
 
 async def get_place_photos(place_id: str) -> list[str]:
     return await list_bucket_folder(PLACE_PHOTOS_BUCKET, place_id)
-
-
-async def get_artifact_image_url(image_path: str) -> str:
-    supabase = await get_supabase()
-    return await supabase.storage.from_(ARTIFACT_PHOTOS_BUCKET).get_public_url(image_path)
 
 
 async def upload_trip_export(user_id: str, trip_id: str, pdf_data: bytes) -> str:

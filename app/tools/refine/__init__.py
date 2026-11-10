@@ -1,12 +1,13 @@
 """Refine-tool registry.
 
-`REFINE_TOOLS` is the list translated by `app.llm.to_gemini_tools` and
-passed as `config.tools` to `generate_content_stream(...)` on refine turns.
-Order is only for prompt clarity; the model doesn't care about the position
-of a tool within the list.
+`REFINE_TOOLS` is the list passed verbatim as `tools=` to
+`client.messages.stream(...)` on refine turns — the dicts are already
+Anthropic-shaped (`{name, description, input_schema}`), so no translation
+happens. Order is only for prompt clarity; the model doesn't care about the
+position of a tool within the list.
 
 `REFINE_TOOL_NAMES` is the set the chat router checks when filtering
-function-call blocks out of the assistant's final message.
+`tool_use` blocks out of the assistant's final message.
 
 `apply_refine_tool` is the validate-and-apply dispatcher; see
 `dispatcher.py`.

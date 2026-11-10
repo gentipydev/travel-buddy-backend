@@ -1,6 +1,6 @@
 # AI Engineering Patterns
 
-The Travel Buddy backend showcases six patterns. Each section here
+The Pathfinder Albania backend showcases six patterns. Each section here
 links to the actual code; treat the codebase as the worked example.
 
 ## 1. Streaming agent loop with tool use
@@ -163,30 +163,59 @@ guarantees the API doesn't.
 
 [`app/llm/caching.py`](../app/llm/caching.py)
 
-The system prompt for `/chat/stream` is ~3-4k tokens of stable
+The system prompt for `/chat/stream` is ~2.5k tokens of stable
 instructions: BASE persona + addenda + (optional) preferences block.
-That prefix barely changes within a chat session. Gemini caches
-**implicitly** on 2.5+/3 models — there is no per-request
-`cache_control` breakpoint API — so
-[`assemble_chat_system`](../app/llm/caching.py) simply joins the stable
-prefix and the per-turn volatile suffix into the single
-`config.system_instruction` string, **prefix first**. Implicit caching
-keys off the longest stable prefix, so keeping the stable text first is
-what still earns cache hits.
+That prefix barely changes within a chat session, so
+[`assemble_chat_system`](../app/llm/caching.py) returns a **two-block**
+`system` payload: the stable prefix carrying a `cache_control:
+{"type": "ephemeral"}` breakpoint, then the per-turn volatile suffix
+uncached. Prompt caching is GA — plain `client.messages.stream(...)`,
+no beta header.
 
 **Stable prefix + volatile suffix.** The volatile half (the refine
 addendum with its per-turn `trip_json`, plus any retrieved RAG context)
 goes last so it never disturbs the cacheable prefix — trip-refine
 sessions still hit cache on the BASE + addenda prefix while their
-`trip_json` blob varies every turn.
+`trip_json` blob varies every turn. This is also why
+[`token_budget.py`](../app/llm/token_budget.py) only ever trims the
+volatile suffix: trimming the prefix would invalidate the cache.
+
+### Measured reality on `claude-haiku-4-5` — plain turns do NOT cache
+
+Caching is prefix-matched over `tools` → `system`, and it silently does
+nothing below a model-specific minimum size. Measured against the live
+API on 2026-08-25:
+
+| Segment | Tokens |
+|---|---|
+| system prompt (no preferences) | 2504 |
+| `ITINERARY_TOOL` | 1738 |
+| **non-refine cacheable prefix** | **4242** → does **not** cache |
+| `+ REFINE_TOOLS` (refine turns only) | 2462 |
+| **refine cacheable prefix** | **6704** → caches |
+
+A bracketing probe on this exact prompt put the effective cutoff between
+4244 (no cache) and 4546 (caches), so plain turns miss by roughly 300
+tokens while refine turns clear it comfortably. The published minimum for
+this model is quoted as 4096; the observed cutoff is a little higher —
+trust the measurement.
+
+The wiring is verified correct: a deliberately padded control prompt
+writes and re-reads the cache exactly as expected. So expect
+`cache_read_input_tokens == 0` on plain turns and non-zero on refine
+turns, and **do not chase the zero as a defect**. It starts paying off
+the moment the prefix crosses the cutoff — a preferences block, a longer
+tool schema — or the model changes (Sonnet 5's minimum is 1024).
+Re-measure before assuming it changed. The absolute cost is small: at
+Haiku rates the un-cached prefix is ~$0.004 per plain turn.
 
 Hit-rate visibility: `RequestTrace`
 ([`observability/telemetry.py`](../app/observability/telemetry.py))
-captures `cache_read_input_tokens` (mapped from Gemini's
-`cached_content_token_count` by `extract_usage`; Gemini has no separate
-cache-creation billing, so `cache_creation_input_tokens` is always 0).
-Cache hit rate = `cache_read / (cache_read + cache_creation +
-input_tokens)`. Render's Logs UI can compute this as a derived metric.
+captures `cache_read_input_tokens` and `cache_creation_input_tokens`
+straight off `Message.usage` via `extract_usage`. Both are live counters
+— Anthropic bills cache **writes** at 1.25x input and cache **reads** at
+0.1x. Cache hit rate = `cache_read / (cache_read + cache_creation +
+input_tokens)`.
 
 Note: `maybe_summarize`, `generate_title`, the persona refresh gate, and
 the manual `/preferences/persona` endpoint all use systems under ~300

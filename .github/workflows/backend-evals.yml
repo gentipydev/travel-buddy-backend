@@ -69,7 +69,7 @@ jobs:
       # tasks open their own session against this; the seed step bootstraps it.
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/evaldb
       ALLOWED_ORIGINS: http://localhost:3000
-      GOOGLE_API_KEY: test-placeholder
+      MAPBOX_ACCESS_TOKEN: test-placeholder
       LOG_LEVEL: WARNING
       LOG_FORMAT: text
       BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}

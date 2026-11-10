@@ -1,21 +1,24 @@
 fastapi==0.115.0
 slowapi==0.1.9
 uvicorn[standard]==0.32.0
-# pydantic floor bumped to satisfy google-genai (needs >=2.12.5); upper-bounded
-# below the next major. pydantic-settings 2.7.1 stays compatible (needs >=2.7).
+# pydantic upper-bounded below the next major. pydantic-settings 2.7.1 stays
+# compatible (needs >=2.7).
 pydantic>=2.12.5,<3.0.0
 pydantic-settings==2.7.1
 sqlalchemy[asyncio]==2.0.35
 asyncpg==0.29.0
 pgvector==0.3.6
-# Google Gemini SDK — the chat agent streams via
-# `client.aio.models.generate_content_stream(...)` and the auxiliary call sites
-# use `client.aio.models.generate_content(...)`. 2.10.x is the first line
-# carrying the async function-calling + partial-args surface the agent reads.
-# Bump deliberately when validating an upgrade.
-google-genai>=2.10.0,<3.0.0
-# httpx floor bumped to 0.28.1 — required by google-genai. The old 0.27 pin is
-# incompatible with the genai/anthropic transport (the removed `proxies=` arg).
+# Anthropic SDK — the chat agent streams via `client.messages.stream(...)` and
+# the auxiliary call sites use `client.messages.create(...)`. 1.x is the current
+# major: it moved the HTTP layer from `httpx` to the maintained `httpx2` fork
+# (installed alongside, no conflict with the `httpx` pin below) and requires
+# Python >= 3.10. Never hand an `httpx` object to the client — use
+# `anthropic.Timeout(...)`, which is already an `httpx2.Timeout`.
+anthropic>=1.0.0,<2.0.0
+# httpx — used directly by app/integrations/* (Mapbox geocoding / Directions)
+# and by the MockTransport test fixtures. Distinct from the
+# `httpx2` the Anthropic SDK pulls in; do NOT call `httpx2.alias_httpx()`, it
+# would silently re-point cohere / supabase / these fixtures too.
 httpx>=0.28.1,<1.0.0
 tenacity==9.0.0
 cohere==5.11.0
@@ -33,5 +36,7 @@ braintrust>=0.0.200
 autoevals>=0.0.130
 # Sentry — production error visibility. Init is a no-op when SENTRY_DSN
 # is empty so local dev / CI runs unchanged. The fastapi extra pulls the
-# integration that auto-instruments request spans.
+# integration that auto-instruments request spans. Note: its httpx
+# auto-instrumentation does not see Anthropic traffic (httpx2);
+# RequestTrace + Braintrust cover that ground.
 sentry-sdk[fastapi]>=2.18.0

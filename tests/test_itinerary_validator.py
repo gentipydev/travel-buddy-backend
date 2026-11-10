@@ -55,7 +55,6 @@ def test_valid_full_itinerary_round_trips():
                         "notes": "Wear sturdy shoes",
                         "lat": 40.7038,
                         "lng": 19.9457,
-                        "google_place_id": "ChIJxx",
                     }
                 ],
             }
@@ -77,7 +76,6 @@ def test_valid_full_itinerary_round_trips():
         "notes",
         "lat",
         "lng",
-        "google_place_id",
     ):
         assert key in stop, f"{key} missing from validated payload"
 

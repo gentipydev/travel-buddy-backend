@@ -121,7 +121,6 @@ async def create_trip(
                         notes=stop.notes,
                         lat=stop.lat,
                         lng=stop.lng,
-                        google_place_id=stop.google_place_id,
                     )
                 )
             trip.days.append(trip_day)
@@ -454,7 +453,7 @@ async def replace_trip(
     the new source of truth.
 
     Per-user 20/hour ceiling: every replace rewrites the normalized
-    days/stops tables and fires the async enrichment chain (Google Places +
+    days/stops tables and fires the async enrichment chain (geocoding +
     Directions + static map signing). The ceiling is loose enough that a
     user actively iterating won't hit it but tight enough to bound damage
     from a forked/old client thrashing the endpoint."""

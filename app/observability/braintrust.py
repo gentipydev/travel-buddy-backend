@@ -2,9 +2,9 @@
 
 Three public callables:
   - `bt_init()` — set up the project logger. Call once at app startup.
-  - `bt_wrap_genai(client)` — hook point to wrap the Gemini client for
-    auto-tracing. Braintrust ships no genai wrapper today, so this is a
-    passthrough; kept so enabling it later is a one-line change here.
+  - `bt_wrap_anthropic(client)` — wraps the Anthropic client so every
+    `client.messages.*` call emits a child span under the active parent
+    span. Passthrough when disabled or when the SDK isn't installed.
   - `chat_span(name)` — context manager yielding a Span (or a no-op
     stand-in when Braintrust is disabled) so callers use the same
     `span.log(...)` API in both modes.
@@ -18,7 +18,7 @@ visible, not silent).
 """
 import logging
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from app.config import settings
 
@@ -32,6 +32,16 @@ except ImportError:
     _bt_init_logger = None
     _bt_start_span = None
     _BT_AVAILABLE = False
+
+# Imported separately: `wrap_anthropic` is a newer export than init_logger /
+# start_span, and a version that lacks it must still get spans. Folding it into
+# the block above would flip `_BT_AVAILABLE` off and disable observability
+# wholesale over an optional wrapper.
+_bt_wrap_anthropic: Callable[[Any], Any] | None
+try:
+    from braintrust import wrap_anthropic as _bt_wrap_anthropic
+except ImportError:
+    _bt_wrap_anthropic = None
 
 
 def _enabled() -> bool:
@@ -58,16 +68,28 @@ def bt_init() -> None:
     _bt_init_logger(project=settings.braintrust_project)
 
 
-def bt_wrap_genai(client):
-    """Hook point to wrap the Gemini client for auto-tracing.
+def bt_wrap_anthropic(client):
+    """Wrap the Anthropic client for auto-tracing.
 
-    Braintrust ships no genai wrapper today (only OpenAI / Anthropic /
-    LiteLLM / OpenRouter), so this is a passthrough: the client is returned
-    unchanged in all modes. Kept as the single place to add wrapping if/when
-    a genai wrapper lands, so call sites don't change. The `chat_span`
-    parent span still captures token/latency metadata explicitly.
+    Returns the client unchanged when Braintrust is disabled or the SDK isn't
+    installed, so this is safe to call unconditionally at import time. When
+    enabled, `wrap_anthropic` instruments `client.messages.*` so each call
+    emits a child span under whatever parent span is active on the request —
+    the `chat_span` parent still logs token/latency metadata explicitly.
+
+    Wrapping is best-effort: a Braintrust version whose wrapper doesn't
+    understand this SDK must not take the whole app down at import.
     """
-    return client
+    if not _enabled() or not _BT_AVAILABLE or _bt_wrap_anthropic is None:
+        return client
+    try:
+        return _bt_wrap_anthropic(client)
+    except Exception:
+        logger.warning(
+            "braintrust: wrap_anthropic failed — continuing untraced",
+            exc_info=True,
+        )
+        return client
 
 
 class _NoopSpan:

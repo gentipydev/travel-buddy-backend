@@ -8,3 +8,6 @@ mypy==1.13.0
 # package must be importable for the LLM-as-judge eval suites to run — even
 # though the judged model is Claude. Eval/CI-only; prod never imports these.
 openai>=1.40.0
+# scripts/upload_destination_photos.py and upload_artifact_photos.py resize and
+# re-encode the gallery photos and artifact pictures
+pillow==12.2.0

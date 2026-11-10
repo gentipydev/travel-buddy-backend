@@ -104,7 +104,7 @@ def estimate_travel_minutes(
     """Best estimate of travel time between two coords, in minutes.
 
     Preference order:
-      1. cached_route.duration_seconds (Google Directions, possibly road-snapped)
+      1. cached_route.duration_seconds (Mapbox Directions, road-snapped)
       2. haversine km + speed-by-mode (walking < WALKING_THRESHOLD_KM else driving)
       3. MIN_LEG_MINUTES floor when coords are missing entirely
 

@@ -11,22 +11,28 @@ Endpoints are public — `NetworkImage` cannot easily attach a Bearer token,
 and these are non-sensitive cultural-heritage assets. The buckets
 themselves are public-read.
 """
-from fastapi import APIRouter, HTTPException, Query
+import asyncio
+import logging
+from collections.abc import Iterable
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import Depends
 
 from app.db.engine import get_session
 from app.db.models import Artifact
 from app.integrations.supabase_storage import (
+    ARTIFACT_PHOTOS_BUCKET,
     PLACE_PHOTOS_BUCKET,
-    get_artifact_image_url,
-    list_bucket_folder,
+    THUMBS_FOLDER,
+    list_image_names,
+    public_url,
+    thumb_path,
 )
 
-
 router = APIRouter(tags=["images"])
+logger = logging.getLogger(__name__)
 
 
 # Slugs are validated against this set so that an unknown destination 404s
@@ -47,12 +53,15 @@ DESTINATION_SLUGS: frozenset[str] = frozenset({
 class DestinationPhotos(BaseModel):
     slug: str
     photos: list[str]
+    # Small copies for the gallery grid, same order as `photos`. An entry is
+    # the full-size URL when that photo has no small copy yet.
+    thumbs: list[str]
 
 
 class ArtifactOut(BaseModel):
     """Mirrors the mobile `ArtifactData` shape so the JSON can be deserialized
-    directly into the existing model. `image_small` / `image_medium` are
-    reserved for future size variants — today they all return the same URL."""
+    directly into the existing model. `image_small` / `image_medium` point at
+    the small copy in `thumbs/` when there is one, else at the full image."""
     id: str
     title: str
     image: str
@@ -83,14 +92,40 @@ def _validate_slug(slug: str) -> str:
     return slug
 
 
-async def _to_artifact_out(row: Artifact) -> ArtifactOut:
-    url = await get_artifact_image_url(row.image_path)
+async def _existing_thumbs(bucket: str, folders: Iterable[str]) -> set[str]:
+    """Paths of the small copies that exist under `{folder}/thumbs/`, one
+    listing per folder. A failed listing just means full-size URLs are
+    served, so it is logged and skipped rather than failing the request."""
+    folders = sorted(set(folders))
+    results = await asyncio.gather(
+        *(list_image_names(bucket, f"{folder}/{THUMBS_FOLDER}") for folder in folders),
+        return_exceptions=True,
+    )
+    existing: set[str] = set()
+    for folder, names in zip(folders, results, strict=True):
+        if isinstance(names, BaseException):
+            logger.warning("thumb listing failed for %s/%s: %r", bucket, folder, names)
+            continue
+        existing.update(f"{folder}/{THUMBS_FOLDER}/{name}" for name in names)
+    return existing
+
+
+async def _artifact_thumbs(rows: Iterable[Artifact]) -> set[str]:
+    return await _existing_thumbs(
+        ARTIFACT_PHOTOS_BUCKET, (row.image_path.rpartition("/")[0] for row in rows)
+    )
+
+
+async def _to_artifact_out(row: Artifact, thumbs: set[str]) -> ArtifactOut:
+    url = await public_url(ARTIFACT_PHOTOS_BUCKET, row.image_path)
+    small_path = thumb_path(row.image_path)
+    small = await public_url(ARTIFACT_PHOTOS_BUCKET, small_path) if small_path in thumbs else url
     return ArtifactOut(
         id=row.id,
         title=row.title,
         image=url,
-        image_small=url,
-        image_medium=url,
+        image_small=small,
+        image_medium=small,
         date=row.date_text or "",
         period=row.period or "",
         country=row.country or "",
@@ -108,13 +143,25 @@ async def _to_artifact_out(row: Artifact) -> ArtifactOut:
 @router.get("/destinations/{slug}/photos", response_model=DestinationPhotos)
 async def list_destination_photos(slug: str) -> DestinationPhotos:
     """Photo gallery manifest. Lists `place-photos/destinations/{slug}/`,
-    sorted by filename. Empty array if the folder hasn't been seeded yet —
-    not an error, the gallery shows its existing spinner state."""
+    sorted by filename, plus each photo's small copy from `thumbs/`. Empty
+    arrays if the folder hasn't been seeded yet — not an error, the app
+    falls back to its bundled photos."""
     _validate_slug(slug)
-    photos = await list_bucket_folder(
-        PLACE_PHOTOS_BUCKET, f"destinations/{slug}"
+    folder = f"destinations/{slug}"
+    names, thumbs = await asyncio.gather(
+        list_image_names(PLACE_PHOTOS_BUCKET, folder),
+        _existing_thumbs(PLACE_PHOTOS_BUCKET, [folder]),
     )
-    return DestinationPhotos(slug=slug, photos=photos)
+    photos: list[str] = []
+    small: list[str] = []
+    for name in names:
+        url = await public_url(PLACE_PHOTOS_BUCKET, f"{folder}/{name}")
+        small_path = thumb_path(f"{folder}/{name}")
+        photos.append(url)
+        small.append(
+            await public_url(PLACE_PHOTOS_BUCKET, small_path) if small_path in thumbs else url
+        )
+    return DestinationPhotos(slug=slug, photos=photos, thumbs=small)
 
 
 @router.get(
@@ -132,10 +179,11 @@ async def list_destination_artifacts(
         .order_by(Artifact.category, Artifact.sort_order)
     )).scalars().all()
 
+    thumbs = await _artifact_thumbs(rows)
     highlights: list[ArtifactOut] = []
     collectibles: list[ArtifactOut] = []
     for row in rows:
-        out = await _to_artifact_out(row)
+        out = await _to_artifact_out(row, thumbs)
         if row.category == "highlight":
             highlights.append(out)
         elif row.category == "collectible":
@@ -153,7 +201,7 @@ async def get_artifact(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_id}")
-    return await _to_artifact_out(row)
+    return await _to_artifact_out(row, await _artifact_thumbs([row]))
 
 
 @router.get(
@@ -184,4 +232,5 @@ async def search_destination_artifacts(
         .limit(limit)
     )
     rows = (await db.execute(stmt, {"q": q})).scalars().all()
-    return [await _to_artifact_out(r) for r in rows]
+    thumbs = await _artifact_thumbs(rows)
+    return [await _to_artifact_out(r, thumbs) for r in rows]

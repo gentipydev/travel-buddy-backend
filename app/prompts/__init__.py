@@ -1,4 +1,4 @@
-"""Travel Buddy prompt registry.
+"""Pathfinder Albania prompt registry.
 
 Public API:
   - `build_system_prompt(preferences, trip_context=None)` — the /chat/stream

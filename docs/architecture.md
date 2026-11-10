@@ -1,11 +1,11 @@
 # Architecture
 
-Travel Buddy is a FastAPI backend that powers an Albania-first AI
-travel assistant. It speaks SSE to a Flutter client, streams Google
-Gemini responses with tool use, and persists trips + conversations into
+Pathfinder Albania is a FastAPI backend that powers an Albania-first AI
+travel assistant. It speaks SSE to a Flutter client, streams Mapbox
+Claude responses with tool use, and persists trips + conversations into
 Supabase (Postgres + Auth + Storage). The package layout is organized
-around **what each module talks to** — `llm/` talks to Gemini,
-`integrations/` talks to Google + Cohere + Supabase Storage, `agents/`
+around **what each module talks to** — `llm/` talks to Anthropic,
+`integrations/` talks to Mapbox + Cohere + Supabase Storage, `agents/`
 composes the LLM + the tools + the domain into a streaming turn, and so
 on.
 
@@ -17,9 +17,9 @@ app/
 ├── agents/          Multi-step LLM orchestration. Owns the streaming loop.
 ├── prompts/         Single source of truth for every system prompt.
 ├── tools/           tool-use schemas + validators + dispatchers.
-├── llm/             Gemini client + adapters, system-prompt helpers, SSE encoding.
+├── llm/             Anthropic client, prompt-caching helpers, SSE encoding.
 ├── rag/             Embedding + reranking + retrieval + place detection.
-├── integrations/    Third-party APIs (Google Maps, Cohere, Supabase Storage).
+├── integrations/    Third-party APIs (Mapbox, Cohere, Supabase Storage).
 ├── domain/          Business logic — trips and conversations.
 ├── observability/   Structured logging + per-request telemetry traces.
 ├── auth/            Supabase JWT verification.
@@ -68,8 +68,8 @@ is what evals pin to.
 The `builders.py` module exposes
 [`build_system_payload(prefs, trip_context)`](../app/prompts/builders.py)
 which returns `(cached_prefix, volatile_suffix)` — the chat agent feeds
-those to `assemble_chat_system`, which joins them into the single
-`system_instruction` string Gemini takes.
+those to `assemble_chat_system`, which turns them into the two-block
+`system` payload, with a `cache_control` breakpoint on the stable prefix.
 
 ### `tools/` — tool-use schemas
 
@@ -91,15 +91,17 @@ Two flavours:
 
 ### `llm/` — model layer
 
-- [`gemini_client.py`](../app/llm/gemini_client.py): the shared
-  `genai.Client` singleton + the `generate_text` one-shot helper.
-- [`gemini_adapter.py`](../app/llm/gemini_adapter.py): translates the
-  app's Anthropic-shaped data to the SDK — `to_gemini_contents` (messages,
-  fetching + inlining image URLs), `to_gemini_tools` (JSON Schema →
-  `types.Schema`), `extract_usage` (token accounting).
-- [`caching.py`](../app/llm/caching.py): joins the stable prefix +
-  volatile suffix into the single `system_instruction` string Gemini
-  takes (Gemini caches implicitly — no per-block `cache_control` marker).
+- [`anthropic_client.py`](../app/llm/anthropic_client.py): the shared
+  `AsyncAnthropic` singleton, the `generate_message` / `generate_text`
+  one-shot helpers, `extract_usage` (token accounting) and
+  `classify_llm_error` (stable error codes for logs + the SSE error frame).
+  There is no adapter module: messages, tool schemas and the token
+  4-tuple are already in the API's own shapes, so nothing is translated.
+- [`caching.py`](../app/llm/caching.py): builds the two-block `system`
+  payload — stable prefix carrying the `cache_control: ephemeral`
+  breakpoint, volatile suffix uncached. Note the measured caveat in that
+  module: on `claude-haiku-4-5` the plain-chat prefix (4242 tokens) sits
+  just under the cutoff, so only refine turns (6704) actually cache.
 - [`streaming.py`](../app/llm/streaming.py): `encode_sse_text` —
   serializes streamed text into SSE `data:` frames (escapes embedded
   newlines so multi-line chunks stay one event).
@@ -126,12 +128,13 @@ continues with no retrieved context.
 ### `integrations/` — third-party APIs
 
 One module per provider:
-[`google_places.py`](../app/integrations/google_places.py) (three-tier:
-curated → cache → API; backfills coords, photos, rating),
-[`google_directions.py`](../app/integrations/google_directions.py)
-(routed polylines with snap-to-roads fallback + 90-day cache),
-[`static_maps.py`](../app/integrations/static_maps.py) (signed Static
-Maps URL builder, pure URL construction),
+[`mapbox_geocoding.py`](../app/integrations/mapbox_geocoding.py) (three-tier:
+curated → cache → Mapbox forward search; backfills coords and address —
+photos and rating come from the curated tier only),
+[`mapbox_directions.py`](../app/integrations/mapbox_directions.py)
+(routed polylines + 90-day cache),
+[`mapbox_static.py`](../app/integrations/mapbox_static.py) (Static Images
+URL builder, pure URL construction),
 [`supabase_storage.py`](../app/integrations/supabase_storage.py)
 (bucket helpers), [`cohere_client.py`](../app/integrations/cohere_client.py)
 (shared Cohere v2 client). Every integration is fail-soft.
@@ -142,7 +145,7 @@ Two subdomains plus the chat-turn pipeline:
 
 - [`trips/`](../app/domain/trips/) — `repository.py` (load/serialize),
   `mutations.py` (`replace_trip_from_payload` + all `apply_*`),
-  `enrichment.py` (post-save Google Places + Directions + static map),
+  `enrichment.py` (post-save geocoding + Directions + static map),
   `geo.py` (Albania bbox + haversine).
 - [`conversations/`](../app/domain/conversations/) — `repository.py`
   (get/create + append + history rendering), `summarization.py`
@@ -197,21 +200,23 @@ POST /chat/stream
            │
            ├── yield "event: conversation_id" (if new)
            ├── yield "event: place_card" (if place detected)
-           ├── system_instruction = assemble_chat_system(cached_prefix, volatile_suffix)
-           │       (llm/caching → single string; Gemini caches implicitly)
+           ├── system_payload = assemble_chat_system(cached_prefix, volatile_suffix)
+           │       (llm/caching → [cached prefix block, volatile suffix block])
            │
-           ├── stream = await client.aio.models.generate_content_stream(
-           │     contents=to_gemini_contents(messages),
-           │     config=GenerateContentConfig(
-           │         system_instruction=system_instruction,
-           │         tools=to_gemini_tools([ITINERARY_TOOL, *REFINE_TOOLS?]),
-           │     ),
-           │   )
-           │   async for chunk in stream:
-           │     for part in chunk.candidates[].content.parts:
-           │         if part.text: yield encode_sse_text(part.text)  (llm/streaming)
-           │         if part.function_call: collect it
-           │     usage_meta = chunk.usage_metadata  (→ extract_usage)
+           ├── async with client.messages.stream(
+           │     system=system_payload,
+           │     messages=messages,                  # already Anthropic-shaped
+           │     tools=[ITINERARY_TOOL, *REFINE_TOOLS?],   # passed verbatim
+           │   ) as response:
+           │     async for event in response:
+           │         if event.type == "text":
+           │             yield encode_sse_text(event.text)   (llm/streaming)
+           │         if event.type == "input_json":          # partial tool args
+           │             stream completed stops onto the live map, one at a
+           │             time, as the model writes them (holding back the
+           │             trailing stop, which may still be mid-write)
+           │     final = await response.get_final_message()
+           │     usage = final.usage  (→ extract_usage)
            │
            │     if emit_itinerary block:
            │         validate_itinerary (tools/itinerary_validator)

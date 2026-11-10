@@ -1,4 +1,4 @@
-"""Braintrust eval runner for Travel Buddy chat regressions.
+"""Braintrust eval runner for Pathfinder Albania chat regressions.
 
 Six suites map onto the categories documented in `evals/README.md`:
   1. itinerary regression — uses `itinerary_schema_valid` + `geo_boundary_adherence`

@@ -34,7 +34,6 @@ STOP_CREATE_PROPS = {
     "notes": {"type": "string"},
     "lat": {"type": "number"},
     "lng": {"type": "number"},
-    "google_place_id": {"type": "string"},
 }
 
 

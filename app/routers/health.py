@@ -19,7 +19,6 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db.engine import get_session
-from app.llm import gemini_client
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +37,8 @@ async def readiness():
     DB connectivity is the only hard gate — without it no request that
     touches Postgres can succeed. API-key presence is reported but does NOT
     fail readiness: a missing COHERE_API_KEY degrades retrieval to
-    lexical-only (still serviceable), and Google keys are kill-switchable.
-    Only `gemini` is functionally required, so it's surfaced but the
+    lexical-only (still serviceable), and Mapbox is kill-switchable.
+    Only `anthropic` is functionally required, so it's surfaced but the
     instance is still "ready" enough to serve health/static endpoints — the
     DB gate is the operational signal an orchestrator should act on.
     """
@@ -60,19 +59,11 @@ async def readiness():
         logger.warning("readiness: DB check failed: %s", db_error)
 
     config = {
-        # In Vertex mode the LLM credential is the service account (or ADC), not
-        # the Developer-API key — report readiness against whichever mode is on.
-        "gemini": bool(
-            settings.google_cloud_project
-            if settings.gemini_use_vertex
-            else settings.gemini_api_key
-        ),
-        "gemini_backend": "vertex" if settings.gemini_use_vertex else "developer",
-        # Vertex credential source: "service_account_json" (good) vs "adc"
-        # (means GOOGLE_SERVICE_ACCOUNT_JSON didn't load — fails on non-GCP hosts).
-        "gemini_vertex_creds": gemini_client.vertex_creds_source,
+        # The LLM credential. A single API key reaches api.anthropic.com from
+        # anywhere — no per-host credential mode to report.
+        "anthropic": bool(settings.anthropic_api_key),
         "cohere": bool(settings.cohere_api_key),
-        "google": bool(settings.google_api_key),
+        "mapbox": bool(settings.mapbox_access_token),
     }
 
     ready = db_ok

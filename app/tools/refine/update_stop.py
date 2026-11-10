@@ -9,7 +9,7 @@ UPDATE_STOP_TOOL = {
         "prompt). Include only the fields you want to change — `name` and "
         "`kind` cannot be cleared once set. Prefer this over "
         "`emit_itinerary` for any single-stop edit (shorter time, different "
-        "name, swap restaurant, attach a `google_place_id`, etc.)."
+        "name, swap restaurant, correct the coordinates, etc.)."
     ),
     "input_schema": {
         "type": "object",

@@ -1,4 +1,4 @@
-"""Centralised logging setup for the Travel Buddy backend.
+"""Centralised logging setup for the Pathfinder Albania backend.
 
 Goals
 -----

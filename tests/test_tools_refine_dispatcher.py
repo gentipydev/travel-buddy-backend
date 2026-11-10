@@ -22,7 +22,7 @@ from app.tools.refine import dispatcher as dispatcher_module
 from app.tools.refine.dispatcher import apply_refine_tool
 
 # conftest.py:31-34 auto-marks async tests but the hook isn't firing under
-# pytest-8 + anyio-4.6 (also why test_google_*.py async tests silently skip).
+# pytest-8 + anyio-4.6 (also why unmarked async tests silently skip).
 # Module-level pytestmark is the standard fallback.
 pytestmark = pytest.mark.anyio
 

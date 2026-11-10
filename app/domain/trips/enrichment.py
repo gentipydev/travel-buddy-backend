@@ -8,13 +8,14 @@ Saves never block on this module.
 Phases:
     1. Load trip + days + stops + existing routes; truncate routes (refines
        produce a clean route set).
-    2. Places enrichment in parallel — curated/cache/Google. Updates each
-       stop's photo_url/rating/formatted_address; backfills lat/lng when
-       Claude's output was sparse but the curated row has them.
+    2. Place resolution in parallel — curated/cache/Mapbox. Backfills each
+       stop's lat/lng and formatted_address; photo_url/photos/rating come
+       from the curated tier only (Mapbox supplies neither, and the client
+       renders its own placeholder for stops without a photo).
     3. Directions in parallel for consecutive stops with coords. Inserts
        trip_routes rows; failed segments are skipped (the client draws a
        straight line as fallback).
-    4. Build signed Static Maps URL covering all geo'd stops + the new
+    4. Build a Mapbox Static Images URL covering all geo'd stops + the new
        polylines; persist on Trip.static_map_url.
     5. Commit.
 """
@@ -35,13 +36,9 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.db.models import Trip, TripDay, TripRoute, TripStop
 from app.domain.trips.geo import haversine_km
-from app.integrations.google_directions import get_route
-from app.integrations.google_places import (
-    EnrichmentResult,
-    enrich_stop,
-    find_place_id_by_name,
-)
-from app.integrations.static_maps import build_static_map_url
+from app.integrations.mapbox_directions import get_route
+from app.integrations.mapbox_geocoding import GeocodeResult, resolve_place
+from app.integrations.mapbox_static import build_static_map_url
 
 
 logger = logging.getLogger(__name__)
@@ -148,36 +145,30 @@ async def _enrich_places(
     """Resolve stops in parallel; mutate each stop in-place. Returns a
     counter with `curated`/`cache`/`fresh`/`missing` for the log line.
 
-    Two-phase. Stops without a `google_place_id` first go through Google
-    Places Text Search to resolve one from name+city — Claude tends to
-    produce names but no IDs, and without an ID there's nothing to enrich
-    or geocode. Resolved stops then merge back with stops that already
-    had an ID and run the full curated/cache/fresh path.
+    Single-phase: Mapbox forward search returns coordinates and a formatted
+    address in one request, so there is no separate id-lookup step. Stops
+    without a usable name can't be resolved at all and count as missing.
     """
     counter: Counter[str] = Counter()
 
-    # Phase A — text-search fallback for stops missing google_place_id.
-    needs_resolution = [
-        s for s in stops if not s.google_place_id and (s.name or "").strip()
-    ]
-    if needs_resolution:
-        await _resolve_missing_place_ids(needs_resolution)
-
-    # Phase B — enrich stops that have an ID (original or just resolved).
-    targets = [s for s in stops if s.google_place_id]
+    targets = [s for s in stops if (s.name or "").strip()]
     counter["missing"] = len(stops) - len(targets)
     if not targets:
         return counter
 
     results = await asyncio.gather(
-        *[enrich_stop(db, s.google_place_id) for s in targets],
+        *[
+            resolve_place(db, name=(s.name or "").strip(), city=s.city)
+            for s in targets
+        ],
         return_exceptions=True,
     )
     for stop, result in zip(targets, results):
         if isinstance(result, Exception):
             logger.warning(
-                "enrich_stop place_id=%s raised=%s",
-                stop.google_place_id,
+                "resolve_place name=%r city=%r raised=%s",
+                stop.name,
+                stop.city,
                 type(result).__name__,
             )
             counter["missing"] += 1
@@ -190,56 +181,20 @@ async def _enrich_places(
     return counter
 
 
-async def _resolve_missing_place_ids(stops: Sequence[TripStop]) -> None:
-    """Run Google Places Text Search in parallel for each stop and write
-    `google_place_id` (and backfill lat/lng when missing) when a result
-    comes back. Stops where the search returns nothing are left alone —
-    the caller counts them as missing in the next phase."""
-    queries = [(s, (s.name or "").strip(), s.city) for s in stops]
-    results = await asyncio.gather(
-        *[find_place_id_by_name(name=name, city=city) for _, name, city in queries],
-        return_exceptions=True,
-    )
-    resolved = 0
-    for (stop, _name, _city), result in zip(queries, results):
-        if isinstance(result, Exception):
-            logger.warning(
-                "find_place_id name=%r city=%r raised=%s",
-                stop.name,
-                stop.city,
-                type(result).__name__,
-            )
-            continue
-        if result is None:
-            continue
-        place_id, lat, lng = result
-        stop.google_place_id = place_id
-        if stop.lat is None:
-            stop.lat = lat
-        if stop.lng is None:
-            stop.lng = lng
-        resolved += 1
-    logger.info(
-        "trip_enrichment textsearch_resolved=%d/%d", resolved, len(stops)
-    )
-
-
-def _apply_to_stop(stop: TripStop, result: EnrichmentResult) -> None:
-    if result.photo_url is not None:
-        stop.photo_url = result.photo_url
-    # Always write `photos` so the list stays in sync with the enrichment we
-    # just resolved (a re-enrichment that returns fewer photos shouldn't leave
-    # stale entries from the previous run). Cap at 3 — that's all the UI uses.
-    primary = [result.photo_url] if result.photo_url else []
-    stop.photos = (primary + result.additional_photos)[:3]
-    if result.rating is not None:
-        stop.rating = result.rating
+def _apply_to_stop(stop: TripStop, result: GeocodeResult) -> None:
+    # Photos and rating are curated-only — Mapbox has neither. Always write
+    # `photos` so the list stays in sync with what we just resolved (a
+    # re-enrichment that finds no curated row shouldn't leave stale entries
+    # from a previous run). Cap at 3 — that's all the UI uses.
+    stop.photos = result.photos[:3]
+    stop.photo_url = stop.photos[0] if stop.photos else None
+    stop.rating = result.rating
     if result.formatted_address is not None:
         stop.formatted_address = result.formatted_address
     # Backfill coords only when missing — Claude's value wins if both have one.
-    if stop.lat is None and result.lat is not None:
+    if stop.lat is None:
         stop.lat = result.lat
-    if stop.lng is None and result.lng is not None:
+    if stop.lng is None:
         stop.lng = result.lng
 
 
@@ -435,42 +390,44 @@ def _build_static_map(
         return None
     polylines = [r.encoded_polyline for r in routes]
 
+    if not settings.mapbox_access_token:
+        return None
+
     return build_static_map_url(
-        api_key=settings.google_api_key,
-        signing_secret=settings.google_url_signing_secret,
+        access_token=settings.mapbox_access_token,
         markers_by_day=markers_by_day,
         polylines=polylines,
     )
 
 
 async def geocode_stop_preview(
+    db: AsyncSession,
     *,
     name: str,
     city: str | None,
     lat: float | None,
     lng: float | None,
-) -> tuple[float, float, str | None] | None:
+) -> tuple[float, float] | None:
     """Resolve one stop's coordinates for the live map, no persistence.
 
     Used by `/chat/stream` to drop a marker the instant a stop streams out
     of the itinerary tool call. Prefers coords Claude already supplied;
-    otherwise runs the same Google Places text-search (`find_place_id_by_name`)
-    every saved trip uses. Returns `(lat, lng, google_place_id|None)` or
-    None when the stop can't be mapped. Never raises.
+    otherwise runs the same `resolve_place` lookup every saved trip uses
+    (which may write the shared geocode cache, but touches nothing else).
+    Returns `(lat, lng)` or None when the stop can't be mapped. Never raises.
     """
     if lat is not None and lng is not None:
-        return lat, lng, None
+        return lat, lng
     if not (name or "").strip():
         return None
     try:
-        result = await find_place_id_by_name(name=name, city=city)
+        result = await resolve_place(db, name=name, city=city)
     except Exception:
         logger.warning("geocode_stop_preview name=%r raised", name, exc_info=True)
         return None
     if result is None:
         return None
-    place_id, r_lat, r_lng = result
-    return r_lat, r_lng, place_id
+    return result.lat, result.lng
 
 
 async def build_live_route_dicts(
@@ -549,9 +506,9 @@ async def geocode_itinerary_preview(db: AsyncSession, payload: dict) -> dict:
     Used by `/chat/stream` to light up the map the moment Claude emits an
     itinerary, before (and independent of) any "Save". Builds transient ORM
     objects from the validated `emit_itinerary` payload, runs the same
-    `_enrich_places` resolution every saved trip goes through (Google Places
-    text-search → google_place_id + lat/lng, plus photos/rating/address),
-    and serializes the result into the canonical `TripOut` shape.
+    `_enrich_places` resolution every saved trip goes through (curated row →
+    geocode cache → Mapbox forward search, for lat/lng + address), and
+    serializes the result into the canonical `TripOut` shape.
 
     Two deliberate departures from `enrich_trip`:
       - Nothing touches the session/DB beyond cache reads — no trip row, so
@@ -609,7 +566,6 @@ async def geocode_itinerary_preview(db: AsyncSession, payload: dict) -> dict:
                     notes=stop_payload.get("notes"),
                     lat=stop_payload.get("lat"),
                     lng=stop_payload.get("lng"),
-                    google_place_id=stop_payload.get("google_place_id"),
                     photos=[],
                 )
             )

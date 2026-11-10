@@ -11,8 +11,7 @@ standard retry policy:
 Explicitly NOT retried:
     - 4xx other than 429 — the caller's request is malformed; retrying
       will produce the same error and just slow things down.
-    - 3xx — the caller has set `follow_redirects` deliberately (e.g. the
-      Google Places photo endpoint returns 302 by design) and is
+    - 3xx — the caller has set `follow_redirects` deliberately and is
       handling them in-line.
 
 Tests inject `httpx.MockTransport` via the `mock_http` conftest fixture,
@@ -73,8 +72,8 @@ async def http_post_with_retry(
 ) -> httpx.Response:
     """`client.post(url, **kwargs)` with the shared external-API retry policy.
 
-    Used for the Places API (New) `places:searchText` endpoint, which is a
-    POST (the legacy Text Search was a GET). Same policy as the GET helper:
-    retry on 429/5xx and network blips, never on other 4xx.
+    Same policy as the GET helper: retry on 429/5xx and network blips, never
+    on other 4xx. No integration POSTs today — kept because it is the natural
+    counterpart to `http_get_with_retry` for any vendor that needs one.
     """
     return await client.post(url, **kwargs)

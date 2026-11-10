@@ -32,7 +32,7 @@ jobs:
     env:
       # Placeholder values so `app.config.Settings` loads without complaint
       # at pytest collection time. Tests mock all outbound calls (Anthropic,
-      # Cohere, Google) so these are never used as real credentials.
+      # Cohere, Mapbox) so these are never used as real credentials.
       ANTHROPIC_API_KEY: sk-test-placeholder
       COHERE_API_KEY: test-placeholder
       SUPABASE_URL: https://example.supabase.co
@@ -40,7 +40,7 @@ jobs:
       SUPABASE_SERVICE_KEY: test-placeholder
       DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
       ALLOWED_ORIGINS: http://localhost:3000
-      GOOGLE_API_KEY: test-placeholder
+      MAPBOX_ACCESS_TOKEN: test-placeholder
       LOG_LEVEL: WARNING
       LOG_FORMAT: text
     steps:

@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Travel Buddy API", lifespan=lifespan)
+app = FastAPI(title="Pathfinder Albania API", lifespan=lifespan)
 
 # Attach the rate limiter so the @limiter.limit decorators on individual
 # routes can find it via request.app.state.limiter. The 429 response

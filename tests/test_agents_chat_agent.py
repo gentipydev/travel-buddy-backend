@@ -55,7 +55,7 @@ def _new_trace(*, user_id: str | None = None) -> RequestTrace:
         input_tokens=None,
         output_tokens=None,
         latency_ms=0.0,
-        model="gemini-2.5-flash",
+        model="claude-haiku-4-5",
         error=None,
     )
 
@@ -234,8 +234,8 @@ async def test_emit_itinerary_streams_per_stop_markers(monkeypatch, fake_db):
     )
 
     # Override the conftest no-op so stops actually geocode to coords.
-    async def _fake_geocode(*, name, city, lat, lng):
-        return (41.33, 19.82, f"pid-{name}")
+    async def _fake_geocode(_db, *, name, city, lat, lng):
+        return (41.33, 19.82)
 
     monkeypatch.setattr(chat_agent_module, "geocode_stop_preview", _fake_geocode)
 
@@ -523,8 +523,8 @@ async def test_estimated_cost_usd_derived_from_token_usage(
     monkeypatch, fake_db,
 ):
     """compute_cost runs before log_trace and lands on self.trace. At
-    gemini-2.5-flash rates: 100 input × $0.30/1M + 200 output × $2.50/1M
-    = 0.00053."""
+    claude-haiku-4-5 rates: 100 input × $1.00/1M + 200 output × $5.00/1M
+    = 0.0001 + 0.001 = 0.0011."""
     monkeypatch.setattr(
         chat_agent_module,
         "client",
@@ -546,7 +546,7 @@ async def test_estimated_cost_usd_derived_from_token_usage(
         started_at=0.0,
     )
     await _drain(agent.stream())
-    assert trace.estimated_cost_usd == pytest.approx(0.00053)
+    assert trace.estimated_cost_usd == pytest.approx(0.0011)
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +587,7 @@ def test_chat_agent_init_backfills_ctx_fields_on_trace(fake_db):
 
 
 # ---------------------------------------------------------------------------
-# Cassette-driven tests via `fake_gemini_stream` fixture (conftest.py).
+# Cassette-driven tests via `fake_anthropic_stream` fixture (conftest.py).
 #
 # These verify the same paths as the inline `_fake_client` tests above but
 # through the recorded-response cassette layer — the path the eval harness
@@ -597,7 +597,7 @@ def test_chat_agent_init_backfills_ctx_fields_on_trace(fake_db):
 
 
 async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
-    fake_gemini_stream, monkeypatch, fake_db,
+    fake_anthropic_stream, monkeypatch, fake_db,
 ):
     """The `chat_text_only` cassette has no tool calls and ~3120 cached
     input tokens. After the stream completes:
@@ -605,7 +605,7 @@ async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
     - no itinerary or trip_refined event
     - cache_read_input_tokens should land on the trace from `response.usage`
     """
-    fake_gemini_stream("chat_text_only")
+    fake_anthropic_stream("chat_text_only")
     # Persistence is out of scope for this test — stub the writer that
     # would otherwise need a real conversation row.
     monkeypatch.setattr(
@@ -645,7 +645,7 @@ async def test_chat_agent_text_only_cassette_streams_and_captures_cache_tokens(
 
 
 async def test_chat_agent_emit_itinerary_cassette_emits_itinerary_event(
-    fake_gemini_stream, monkeypatch, fake_db,
+    fake_anthropic_stream, monkeypatch, fake_db,
 ):
     """The `chat_emit_itinerary` cassette pairs prose deltas with a valid
     `emit_itinerary` tool block (stops are in Albania so the geo validator
@@ -654,7 +654,7 @@ async def test_chat_agent_emit_itinerary_cassette_emits_itinerary_event(
     - emit `event: itinerary` with the validated payload
     - record itinerary_emitted=True + days count on the trace
     """
-    fake_gemini_stream("chat_emit_itinerary")
+    fake_anthropic_stream("chat_emit_itinerary")
     monkeypatch.setattr(
         chat_agent_module, "append_messages", AsyncMock(return_value=None)
     )
@@ -800,3 +800,95 @@ async def test_disconnect_releases_slot_and_schedules_estimated_usage(
     assert recorded[0]["input_tokens"] == 0
     assert recorded[0]["output_tokens"] == 3
     assert recorded[0]["estimated_cost_usd"] > 0
+
+
+async def test_live_markers_stream_during_generation_not_flushed_at_end(
+    monkeypatch, fake_db,
+):
+    """Stops must be geocoded and emitted AS the tool input streams, not in a
+    burst once the message is complete.
+
+    This is the behavior the Gemini era could not support (that SDK delivered
+    tool calls whole, so every marker landed after the stream closed). Both
+    designs produce identical SSE frames in identical order, so frame order
+    alone cannot tell them apart — the observable difference is *when* the
+    work happens relative to the end of the stream.
+
+    So we pin it with a clock: `validate_itinerary` runs in the dispatch block
+    AFTER the stream closes. If markers stream progressively, all stops but
+    the last are already geocoded by the time it is called. If they were
+    flushed at the end, none would be.
+    """
+    itinerary = {
+        "title": "Tirana",
+        "days": [
+            {
+                "day_number": 1,
+                "title": "Old Town & history",
+                "stops": [
+                    {"name": "Skanderbeg Square", "kind": "sight"},
+                    {"name": "Bunk'Art 2", "kind": "sight"},
+                    {"name": "Et'hem Bey Mosque", "kind": "sight"},
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        chat_agent_module,
+        "client",
+        _fake_client(
+            text_chunks=["A lovely day."],
+            final_message=_final_message(
+                content=[
+                    _text_block("A lovely day."),
+                    _tool_use("emit_itinerary", itinerary),
+                ],
+                stop_reason="tool_use",
+            ),
+        ),
+    )
+
+    geocoded: list[str] = []
+
+    async def _recording_geocode(_db, *, name, city, lat, lng):
+        geocoded.append(name)
+        return (41.33, 19.82)
+
+    monkeypatch.setattr(
+        chat_agent_module, "geocode_stop_preview", _recording_geocode
+    )
+
+    # Snapshot how many stops had streamed by the time the post-stream
+    # dispatch begins.
+    real_validate = chat_agent_module.validate_itinerary
+    at_dispatch: list[int] = []
+
+    def _spy_validate(raw_input):
+        at_dispatch.append(len(geocoded))
+        return real_validate(raw_input)
+
+    monkeypatch.setattr(chat_agent_module, "validate_itinerary", _spy_validate)
+
+    agent = ChatAgent(
+        db=fake_db,
+        request=ChatRequest(message="a day in Tirana"),
+        ctx=_ctx(),
+        user_id=None,
+        trace=_new_trace(),
+        started_at=0.0,
+    )
+    frames = await _drain(agent.stream())
+
+    # All three stops reach the client exactly once — no duplicates from the
+    # live loop and the end-of-stream drain both emitting the same stop.
+    assert _events(frames).count("itinerary_stop") == 3
+    assert geocoded == ["Skanderbeg Square", "Bunk'Art 2", "Et'hem Bey Mosque"]
+
+    # The load-bearing assertion: 2 of 3 stops were already geocoded before
+    # dispatch. The live loop deliberately holds back the trailing stop (it
+    # may still be mid-write), so the drain emits exactly one.
+    assert at_dispatch == [2], (
+        "expected 2 stops streamed during generation and 1 flushed after; "
+        f"got {at_dispatch[0] if at_dispatch else 'no dispatch'} streamed — "
+        "0 means progressive streaming regressed to an end-of-stream flush"
+    )

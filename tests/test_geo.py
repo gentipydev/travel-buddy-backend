@@ -1,7 +1,7 @@
 """Unit tests for `app.domain.trips.geo.is_in_albania`.
 
 The bbox post-filter is the hard guard against the unbounded-text-search
-failure (a Google Places query for an ambiguous English name resolving to
+failure (a geocoder query for an ambiguous English name resolving to
 a US business). Cases here cover the four obvious neighbors (Kosovo,
 North Macedonia, Greece, Sea) plus US coords with the wrong longitude
 sign — the actual prod failure.

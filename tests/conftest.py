@@ -8,10 +8,10 @@ SELECT to return; the production code's logic is exercised against these
 without a real Postgres or any ORM machinery beyond statement construction.
 
 `MockTransportRegistry` — install per-URL response handlers, then patch the
-private `_http_client` factories in `app.integrations.google_places` and
-`app.integrations.google_directions` to use `httpx.MockTransport`. Each
+private `_http_client` factories in `app.integrations.mapbox_geocoding` and
+`app.integrations.mapbox_directions` to use `httpx.MockTransport`. Each
 handler can return a Response with any status / headers / body, so the
-photo-redirect path is testable too.
+error and quota paths are testable too.
 
 Requires `pytest` and `pytest-asyncio` (configured via pytest.ini's
 `asyncio_mode = auto`). Install with: `pip install pytest pytest-asyncio`.
@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import os
 
-# Ensure a truthy Gemini key before app.config's Settings singleton is
+# Ensure a truthy Anthropic key before app.config's Settings singleton is
 # constructed (env vars take precedence over the .env file, which is left
 # empty for the developer to fill). Lets the FastAPI lifespan's
-# `validate_required_keys()` pass under TestClient; the genai client never
+# `validate_required_keys()` pass under TestClient; the Anthropic client never
 # makes a real call in tests (it's monkeypatched).
-os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
+os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test")
 
 import asyncio
 from collections.abc import Callable
@@ -52,15 +52,44 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture(autouse=True)
+def _no_output_guard_llm(monkeypatch):
+    """Keep the output guardrail off the network by default.
+
+    `ChatAgent.stream()` runs `check_output_guardrail` on every successful
+    turn, and that call site is NOT covered by the chat-agent tests' `client`
+    monkeypatch — it reaches `app.llm.generate_text` directly. Left alone it
+    makes a real (doomed, retried) request to api.anthropic.com per test:
+    slow, flaky, and dependent on network access in CI.
+
+    The guard is fail-open and observational, so returning "SAFE" preserves
+    every existing assertion. Tests that exercise the guard re-patch
+    `generate_text` on their own module (later setattr wins), same as the
+    geocode fixture below.
+    """
+    from unittest.mock import AsyncMock
+
+    from app.domain import output_guard as _guard
+
+    monkeypatch.setattr(_guard, "generate_text", AsyncMock(return_value="SAFE"))
+
+
+@pytest.fixture(autouse=True)
 def _no_chat_geocode(monkeypatch):
     """Keep the chat agent's live-map geocoding off the network by default.
 
-    `ChatAgent.stream()` now geocodes itinerary stops (per-stop + a whole-trip
-    fallback) to drive the live map. Those call Google Places via real HTTP,
-    which unit tests must not hit. Default both to no-ops returning nothing —
-    so the map side-channel emits no frames and the text/itinerary/refine
-    contract every existing test pins stays unchanged. A test that wants to
-    exercise the geocoding path re-patches these (later setattr wins)."""
+    `ChatAgent.stream()` geocodes itinerary stops (per-stop + a whole-trip
+    fallback) and builds road-following routes between them to drive the live
+    map. All three call Mapbox over real HTTP — billable against the account's
+    quota, and unit tests must not hit them.
+    Default all three to no-ops returning nothing, so the map side-channel
+    emits no frames and the text/itinerary/refine contract every existing test
+    pins stays unchanged. A test that wants to exercise those paths re-patches
+    them (later setattr wins).
+
+    `build_live_route_dicts` matters most here: a test that DOES exercise
+    geocoding gets two or more resolved stops, which is exactly the condition
+    that fires the route builder — so stubbing only the geocoders would leave
+    the expensive call live."""
     from unittest.mock import AsyncMock
 
     from app.agents import chat_agent as _m
@@ -69,6 +98,7 @@ def _no_chat_geocode(monkeypatch):
     monkeypatch.setattr(
         _m, "geocode_itinerary_preview", AsyncMock(return_value=None)
     )
+    monkeypatch.setattr(_m, "build_live_route_dicts", AsyncMock(return_value=[]))
 
 
 class FakeResult:
@@ -172,26 +202,24 @@ def fake_db() -> FakeSession:
 
 
 @pytest.fixture
-def fake_gemini_stream(monkeypatch):
-    """Factory fixture: install a cassette-driven Gemini stream.
+def fake_anthropic_stream(monkeypatch):
+    """Factory fixture: install a cassette-driven Anthropic stream.
 
-    Tests opt-in by calling `fake_gemini_stream("chat_text_only")` (or any
+    Tests opt-in by calling `fake_anthropic_stream("chat_text_only")` (or any
     cassette name under `tests/fakes/cassettes/`). After the call, every
-    `client.aio.models.generate_content_stream(...)` invocation inside the
-    test streams the recorded chunks regardless of args — so chat-agent
+    `client.messages.stream(...)` invocation inside the test replays the
+    recorded deltas / tool calls / usage regardless of args — so chat-agent
     tests exercise the streaming, validation, and SSE-emission paths without
     hitting the network.
 
     monkeypatch auto-rolls back after each test so cassettes don't leak.
     """
     from app import llm
-    from tests.fakes.fake_gemini import make_stream
+    from tests.fakes.fake_anthropic import make_stream
 
     def _install(cassette_name: str):
         factory = make_stream(cassette_name)
-        monkeypatch.setattr(
-            llm.client.aio.models, "generate_content_stream", factory
-        )
+        monkeypatch.setattr(llm.client.messages, "stream", factory)
 
     return _install
 
@@ -240,9 +268,9 @@ def mock_http(monkeypatch) -> MockTransportRegistry:
 
     from tenacity import wait_none
 
-    from app.integrations import _retry, google_directions, google_places
+    from app.integrations import _retry, mapbox_directions, mapbox_geocoding
 
-    monkeypatch.setattr(google_places, "_http_client", factory)
-    monkeypatch.setattr(google_directions, "_http_client", factory)
+    monkeypatch.setattr(mapbox_geocoding, "_http_client", factory)
+    monkeypatch.setattr(mapbox_directions, "_http_client", factory)
     monkeypatch.setattr(_retry.http_get_with_retry.retry, "wait", wait_none())
     return registry

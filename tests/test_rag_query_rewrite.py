@@ -60,7 +60,7 @@ async def test_empty_query_short_circuits(monkeypatch):
 
 async def test_api_error_returns_original(monkeypatch):
     _patch_generate_text(
-        monkeypatch, _FakeGenerateText(raise_exc=RuntimeError("gemini down"))
+        monkeypatch, _FakeGenerateText(raise_exc=RuntimeError("llm down"))
     )
     original = "What can I see around Korçë County?"
     assert await rewrite_query(original) == original

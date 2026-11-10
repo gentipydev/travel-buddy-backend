@@ -19,7 +19,7 @@ Public API:
     imported and unit-tested without a trace context.
   - `compute_cost(...)` — per-model `$/1M token` derivation (see
     `app/observability/pricing.py`).
-  - `bt_init`, `bt_wrap_genai`, `chat_span` — Braintrust hooks. All
+  - `bt_init`, `bt_wrap_anthropic`, `chat_span` — Braintrust hooks. All
     no-op when BRAINTRUST_ENABLED=false (the default) or the SDK is not
     installed, so local dev / CI run unchanged.
 """
@@ -28,7 +28,7 @@ from contextlib import contextmanager
 
 from app.observability.braintrust import (
     bt_init,
-    bt_wrap_genai,
+    bt_wrap_anthropic,
     chat_span,
 )
 from app.observability.logging_config import (
@@ -80,7 +80,7 @@ __all__ = [
     "RequestTrace",
     "TextFormatter",
     "bt_init",
-    "bt_wrap_genai",
+    "bt_wrap_anthropic",
     "chat_span",
     "compute_cost",
     "log_trace",

@@ -1,4 +1,4 @@
-"""Braintrust scorers for Travel Buddy chat evals.
+"""Braintrust scorers for Pathfinder Albania chat evals.
 
 Each scorer is a pure function returning 0.0..1.0 (or a dict with `score`
 and `metadata`). The same function runs offline in `Eval(...)` experiments
@@ -304,7 +304,7 @@ def _build_persona_gate() -> Any:
 
     Reuses the production gate prompt verbatim via the prompt registry,
     so when the prompt is bumped the judge updates automatically. Model
-    defaults to Gemini 3.5 Flash (matches `settings.model_persona_gate` for
+    defaults to Claude Haiku 4.5 (matches `settings.model_persona_gate` for
     cost parity) — override via Braintrust's per-scorer model config if
     stronger judging is needed.
     """
@@ -326,7 +326,7 @@ def _build_persona_gate() -> Any:
             "A=YES (system was right) B=NO (system was wrong)."
         ),
         choice_scores={"A": 1.0, "B": 0.0},
-        model="gemini-3.5-flash",
+        model="claude-haiku-4-5",
         use_cot=False,
     )
 
@@ -406,7 +406,7 @@ def _build_faithfulness() -> Any:
         name="answer_faithfulness",
         prompt_template=_FAITHFULNESS_TEMPLATE,
         choice_scores={"A": 1.0, "B": 0.0},
-        model="gemini-3.5-flash",
+        model="claude-haiku-4-5",
         use_cot=True,
     )
 
@@ -431,7 +431,7 @@ def answer_faithfulness(
 
     Scope: this catches contradictions and fabricated specifics (prices, hours,
     names) — the harmful hallucinations for a travel app. It deliberately does
-    NOT require every sentence to be quoted from context, because Travel Buddy
+    NOT require every sentence to be quoted from context, because Pathfinder Albania
     blends retrieved chunks with the model's general Albania knowledge; a strict
     extractive-faithfulness judge would false-positive on legitimate
     background. The `expected` label in calibration fixtures is for human
@@ -483,7 +483,7 @@ def _build_output_guardrail() -> Any:
         name="output_guardrail",
         prompt_template=template,
         choice_scores={"SAFE": 1.0, "REVIEW": 0.0},
-        model="gemini-3.5-flash",
+        model="claude-haiku-4-5",
         use_cot=False,
     )
 
